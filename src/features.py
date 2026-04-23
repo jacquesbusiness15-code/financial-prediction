@@ -19,9 +19,8 @@ def add_kpis(df: pd.DataFrame) -> pd.DataFrame:
         df.get("hours_actual", pd.Series(np.nan, index=df.index)),
     )
 
-    absence_hours = (df.get("vacation_cost", 0) * 0 +  # placeholder if only costs
-                     0)
-    # Prefer a true absence rate in € if hour breakdown for absence is not in the data:
+    # Prefer a true absence rate in euro if hour breakdown for absence is not
+    # in the data:
     abs_cost = df.get("vacation_cost", 0).fillna(0) + df.get("sick_cost", 0).fillna(0)
     labor_total = df.get("labor_cost_total", np.nan)
     df["absence_rate"] = _safe_div(abs_cost, labor_total)
@@ -64,24 +63,34 @@ def add_kpis(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def add_time_deltas(df: pd.DataFrame, group_cols: tuple[str, ...] = ("cost_center_id",)) -> pd.DataFrame:
-    """Month-over-month and year-over-year deltas on CM metrics, per cost center."""
-    df = df.sort_values(list(group_cols) + ["period"]).copy()
-    g = df.groupby(list(group_cols), sort=False)
+_DELTA_COLS = ("cm_db", "cm_db_pct", "cm_db1", "cm_db2",
+               "revenue_total", "labor_cost_total")
 
-    for col in ("cm_db", "cm_db_pct", "cm_db1", "cm_db2", "revenue_total", "labor_cost_total"):
+
+def add_time_deltas(df: pd.DataFrame,
+                    group_cols: tuple[str, ...] = ("cost_center_id",)
+                    ) -> pd.DataFrame:
+    """Month-over-month + year-over-year deltas per cost center.
+
+    One groupby is reused across every target column. `observed=True` avoids
+    materializing the full cartesian product when grouping by categoricals.
+    """
+    df = df.sort_values(list(group_cols) + ["period"]).copy()
+    g = df.groupby(list(group_cols), sort=False, observed=True)
+
+    for col in _DELTA_COLS:
         if col not in df.columns:
             continue
-        df[f"{col}_mom"] = g[col].diff(1)
-        df[f"{col}_yoy"] = g[col].diff(12)
-        df[f"{col}_mom_pct"] = _safe_div(df[f"{col}_mom"], g[col].shift(1).abs())
+        prev_1 = g[col].shift(1)
+        df[f"{col}_mom"] = df[col] - prev_1
+        df[f"{col}_yoy"] = df[col] - g[col].shift(12)
+        df[f"{col}_mom_pct"] = _safe_div(df[f"{col}_mom"], prev_1.abs())
 
-    # rolling stats for anomaly use
+    # Rolling stats reused by the anomaly detector.
     if "cm_db_pct" in df.columns:
-        df["cm_db_pct_roll6_mean"] = g["cm_db_pct"].transform(
-            lambda s: s.rolling(6, min_periods=3).mean())
-        df["cm_db_pct_roll6_std"] = g["cm_db_pct"].transform(
-            lambda s: s.rolling(6, min_periods=3).std())
+        roll = g["cm_db_pct"].rolling(6, min_periods=3)
+        df["cm_db_pct_roll6_mean"] = roll.mean().reset_index(level=0, drop=True)
+        df["cm_db_pct_roll6_std"] = roll.std().reset_index(level=0, drop=True)
 
     return df.reset_index(drop=True)
 

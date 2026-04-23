@@ -1,6 +1,19 @@
-"""WISAG brand tokens — single source of truth for colors and sizing."""
+"""WISAG brand tokens — single source of truth for every design decision.
+
+Light-only palette. The dark theme was removed; `tokens()` always returns the
+light token set.
+
+This module is the authoritative reference for the WISAG visual system. See
+``docs/style-guide.md`` for the human-readable guide. Every color, spacing,
+radius, type, motion, and elevation value used in ``src/styles.py`` and
+``src/components.py`` must come from here. No hex, no raw px, no rem literals
+in CSS — always reference a token.
+"""
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# Brand (legacy exports kept for any in-code references)
+# ---------------------------------------------------------------------------
 WISAG_ORANGE = "#E94E1B"
 WISAG_ORANGE_DARK = "#C63D0F"
 WISAG_ORANGE_LIGHT = "#FDE6DC"
@@ -19,12 +32,203 @@ NEG_LIGHT = "#FFCDD2"
 NEG_DARK = "#B71C1C"
 NEU = "#9E9E9E"
 WARN = "#F57C00"
+WARN_DARK = "#8A4A00"
 WARN_LIGHT = "#FFE0B2"
+HEATMAP_MID = "#FFF59D"
 
-HEATMAP_SCALE = [NEG, "#FFF59D", POS]
+HEATMAP_SCALE = [NEG, HEATMAP_MID, POS]
 
 SEVERITY_COLORS = {
-    "high": {"bg": NEG_LIGHT, "fg": NEG_DARK, "label": "Hoch"},
-    "medium": {"bg": WARN_LIGHT, "fg": "#8A4A00", "label": "Mittel"},
-    "low": {"bg": POS_LIGHT, "fg": POS_DARK, "label": "Niedrig"},
+    "high":   {"bg": NEG_LIGHT,  "fg": NEG_DARK,  "label": "Hoch"},
+    "medium": {"bg": WARN_LIGHT, "fg": WARN_DARK, "label": "Mittel"},
+    "low":    {"bg": POS_LIGHT,  "fg": POS_DARK,  "label": "Niedrig"},
 }
+
+
+# ---------------------------------------------------------------------------
+# Tokens (flat, namespaced, light only). See docs/style-guide.md for the
+# rationale behind each scale. Keep categories in this order.
+# ---------------------------------------------------------------------------
+
+LIGHT_TOKENS: dict[str, str] = {
+    # ---------- Color: surfaces ----------
+    "bg_app":              "#FAFAF7",
+    "bg_surface":          "#FFFFFF",
+    "bg_muted":            "#F5F5F2",
+    "bg_sidebar":          "#FFFFFF",
+
+    # ---------- Color: foreground ----------
+    "fg_primary":          "#1D1D1B",
+    "fg_secondary":        "#6B6B6B",
+    "fg_muted":            "#9E9E9E",
+    "fg_inverse":          "#FFFFFF",
+
+    # ---------- Color: borders ----------
+    "border":              "#E8E6E1",
+    "border_strong":       "#D8D5CE",
+    "border_subtle":       "#F0EEE9",
+
+    # ---------- Color: brand accent ----------
+    "accent":              WISAG_ORANGE,
+    "accent_dark":         WISAG_ORANGE_DARK,
+    "accent_light":        WISAG_ORANGE_LIGHT,
+
+    # ---------- Color: semantic ----------
+    "pos":                 POS,
+    "pos_dark":            POS_DARK,
+    "pos_light":           POS_LIGHT,
+    "neg":                 NEG,
+    "neg_dark":            NEG_DARK,
+    "neg_light":           NEG_LIGHT,
+    "warn":                WARN,
+    "warn_dark":           WARN_DARK,
+    "warn_light":          WARN_LIGHT,
+    "heatmap_mid":         HEATMAP_MID,
+
+    # ---------- Color: AI accent (lavender) ----------
+    # Used only for AI-generated / exploratory surfaces (Ask-AI CTA,
+    # Explore-more card). Intentionally off-brand to distinguish from data.
+    "accent_ai":           "#EEE9F7",
+    "accent_ai_hover":     "#E5DEF3",
+    "accent_ai_border":    "#E3DCF1",
+    "accent_ai_border_hover": "#D6CCE9",
+
+    # ---------- Spacing (4px grid) ----------
+    "space_0":             "0",
+    "space_1":             "2px",
+    "space_2":             "4px",
+    "space_3":             "6px",
+    "space_4":             "8px",
+    "space_5":             "10px",
+    "space_6":             "12px",
+    "space_7":             "14px",
+    "space_8":             "16px",
+    "space_9":             "20px",
+    "space_10":            "24px",
+    "space_12":            "28px",
+    "space_14":            "32px",
+    "space_16":            "36px",
+    "space_20":            "40px",
+    "space_24":            "48px",
+    "space_32":            "64px",
+    # Non-grid exceptions (documented) — card paddings that don't round.
+    "space_18":            "18px",
+    "space_22":            "22px",
+    "space_26":            "26px",
+    "space_30":            "30px",
+
+    # ---------- Radius ----------
+    "radius_xs":           "4px",
+    "radius_sm":           "6px",
+    "radius_md":           "8px",
+    "radius_lg":           "10px",
+    "radius_xl":           "12px",
+    "radius_2xl":          "14px",
+    "radius_3xl":          "16px",
+    "radius_pill":         "999px",
+
+    # ---------- Typography: family ----------
+    "font_sans":           "'Inter', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif",
+    "font_serif":          "'Newsreader', Georgia, serif",
+    "font_mono":           "ui-monospace, 'SFMono-Regular', Menlo, monospace",
+
+    # ---------- Typography: size scale (rem, 16px root) ----------
+    "text_2xs":            "0.72rem",
+    "text_xs":             "0.78rem",
+    "text_sm":             "0.88rem",
+    "text_base":           "0.94rem",
+    "text_md":             "1.02rem",
+    "text_lg":             "1.15rem",
+    "text_xl":             "1.35rem",
+    "text_2xl":            "1.70rem",
+    "text_3xl":            "1.90rem",
+
+    # ---------- Typography: weight ----------
+    "weight_regular":      "400",
+    "weight_medium":       "500",
+    "weight_semibold":     "600",
+    "weight_bold":         "700",
+
+    # ---------- Typography: line-height ----------
+    "leading_tight":       "1.1",
+    "leading_snug":        "1.25",
+    "leading_normal":      "1.45",
+
+    # ---------- Typography: letter-spacing ----------
+    "tracking_tight":      "-0.01em",
+    "tracking_normal":     "0",
+    "tracking_wide":       "0.02em",
+    "tracking_widest":     "0.04em",
+
+    # ---------- Shadow ----------
+    "shadow":              "0 1px 2px rgba(22,22,20,0.04)",
+    "shadow_lg":           "0 4px 14px rgba(22,22,20,0.06)",
+    "shadow_hero":         "0 4px 16px rgba(233,78,27,0.18)",
+    "shadow_focus":        "0 0 0 3px rgba(233,78,27,0.25)",
+
+    # ---------- Motion ----------
+    "duration_fast":       "0.12s",
+    "duration_base":       "0.15s",
+    "duration_slow":       "0.25s",
+    "easing_standard":     "ease",
+
+    # ---------- Focus / Disabled ----------
+    "focus_ring":          "0 0 0 3px rgba(233,78,27,0.25)",
+    "focus_border":        WISAG_ORANGE,
+    "disabled_bg":         "#F5F5F2",
+    "disabled_fg":         "#9E9E9E",
+    "disabled_opacity":    "0.55",
+
+    # ---------- Z-index ----------
+    "z_base":              "1",
+    "z_dropdown":          "100",
+    "z_sticky":            "200",
+    "z_overlay":           "900",
+    "z_modal":             "1000",
+    "z_toast":             "1100",
+
+    # ---------- Layout ----------
+    "sidebar_width":       "240px",
+    "content_max_width":   "1240px",
+}
+
+
+def tokens() -> dict[str, str]:
+    """Return the flat token dict. Single source of truth for styles.py."""
+    return LIGHT_TOKENS
+
+
+# ---------------------------------------------------------------------------
+# Convenience views — documentation-oriented slices of the flat token dict.
+# Use ``tokens()`` in CSS; these are for tooling / introspection only.
+# ---------------------------------------------------------------------------
+
+def colors() -> dict[str, str]:
+    """Every color-carrying token (surfaces, fg, borders, brand, semantic, ai)."""
+    keys = (
+        "bg_app", "bg_surface", "bg_muted", "bg_sidebar",
+        "fg_primary", "fg_secondary", "fg_muted", "fg_inverse",
+        "border", "border_strong", "border_subtle",
+        "accent", "accent_dark", "accent_light",
+        "pos", "pos_dark", "pos_light",
+        "neg", "neg_dark", "neg_light",
+        "warn", "warn_dark", "warn_light",
+        "heatmap_mid",
+        "accent_ai", "accent_ai_hover", "accent_ai_border", "accent_ai_border_hover",
+    )
+    return {k: LIGHT_TOKENS[k] for k in keys}
+
+
+def space() -> dict[str, str]:
+    """Spacing scale (4px grid + documented non-grid steps)."""
+    return {k: v for k, v in LIGHT_TOKENS.items() if k.startswith("space_")}
+
+
+def type_scale() -> dict[str, str]:
+    """Type sizes only (rem values)."""
+    return {k: v for k, v in LIGHT_TOKENS.items() if k.startswith("text_")}
+
+
+def radius() -> dict[str, str]:
+    """Radius scale."""
+    return {k: v for k, v in LIGHT_TOKENS.items() if k.startswith("radius_")}

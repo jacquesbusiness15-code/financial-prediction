@@ -6,6 +6,7 @@ venv/
 data/*.xlsx
 data/*.xls
 data/*.csv
+data/.cache/
 !data/.gitkeep
 .streamlit/secrets.toml
 .DS_Store
@@ -25,3 +26,11 @@ web/_tmp_*
 .streamlit_upload*.xlsx
 .streamlit_upload*.csv
 .streamlit_upload*.xls
+
+# Ruflo runtime (keep .claude/, .mcp.json, CLAUDE.md committed)
+.claude-flow/
+.swarm/
+.claude/memory.db
+.claude/memory.db-*
+agentdb.rvf
+agentdb.rvf.lock

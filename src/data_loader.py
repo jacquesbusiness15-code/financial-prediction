@@ -2,7 +2,12 @@
 
 Primary strategy: match German header names via HEADER_MAP (robust to column
 reorders). Fallback: rename by Excel column position via COLUMN_MAP (used only
-when no headers are recognized — keeps legacy files working).
+when no headers are recognized - keeps legacy files working).
+
+Dtype coercion is schema-driven: every mapped column is coerced to the dtype
+declared in `src.config.SCHEMA`. Rows whose source value cannot be coerced
+(non-null in, null out) are counted; any such loss on a critical column is
+reported as a dtype mismatch and fails `SchemaReport.ok`.
 """
 from __future__ import annotations
 
@@ -17,23 +22,9 @@ from src.config import (
     COLUMN_MAP,
     CRITICAL_SEMANTIC_COLS,
     HEADER_MAP,
+    SCHEMA,
     col_letter_to_index,
 )
-
-NUMERIC_PREFIXES = ("revenue_", "cost", "subcontractor_", "internal_service_",
-                    "travel_", "labor_", "training_", "vacation_", "sick_",
-                    "material_", "vehicle_", "hours_", "cm_", "hour_variance",
-                    "cost_variance", "quality_", "plan_", "contracted_")
-
-# Columns that match a numeric prefix by accident (e.g. start with "cost")
-# but are actually string identifiers — never coerce these.
-NON_NUMERIC_EXCEPTIONS = {
-    "cost_center_id", "cost_center_name", "cost_center_name_ext",
-    "customer_name", "customer_id", "customer_name_secondary",
-    "contracted_fixed_price",  # this one IS numeric, keep. (placeholder)
-}
-# Trim the placeholder entry back out — keep only true string cols.
-NON_NUMERIC_EXCEPTIONS.discard("contracted_fixed_price")
 
 
 @dataclass
@@ -42,14 +33,20 @@ class SchemaReport:
     unmapped_input: list[str] = field(default_factory=list)
     missing_expected: list[str] = field(default_factory=list)
     strategy: str = "header"  # "header" | "position"
+    # (column, expected_dtype, observed_sample) for columns where coercion lost rows
+    dtype_mismatches: list[tuple[str, str, str]] = field(default_factory=list)
 
     @property
     def missing_critical(self) -> list[str]:
         return [c for c in CRITICAL_SEMANTIC_COLS if c in self.missing_expected]
 
     @property
+    def critical_dtype_mismatches(self) -> list[tuple[str, str, str]]:
+        return [m for m in self.dtype_mismatches if m[0] in CRITICAL_SEMANTIC_COLS]
+
+    @property
     def ok(self) -> bool:
-        return not self.missing_critical
+        return not self.missing_critical and not self.critical_dtype_mismatches
 
     @property
     def expected_total(self) -> int:
@@ -92,14 +89,55 @@ def _rename_by_position(df: pd.DataFrame) -> tuple[pd.DataFrame, SchemaReport]:
     )
 
 
-def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
-    for c in df.columns:
-        if c in NON_NUMERIC_EXCEPTIONS:
+def _coerce_series(s: pd.Series, dtype: str) -> pd.Series:
+    """Coerce `s` to `dtype`. Invalid values become NA/NaN/NaT."""
+    if dtype == "Int64":
+        return pd.to_numeric(s, errors="coerce").astype("Int64")
+    if dtype == "float64":
+        return pd.to_numeric(s, errors="coerce").astype("float64")
+    if dtype == "string":
+        return s.astype("string")
+    if dtype == "category":
+        # Normalize to string first so categorical values compare consistently.
+        return s.astype("string").astype("category")
+    if dtype == "datetime64[ns]":
+        return pd.to_datetime(s, errors="coerce")
+    if dtype == "boolean":
+        return pd.to_numeric(s, errors="coerce").fillna(0).astype("bool")
+    raise ValueError(f"Unsupported dtype in SCHEMA: {dtype!r}")
+
+
+def _sample_bad_value(original: pd.Series, coerced: pd.Series) -> str:
+    """Pick the first source value that failed to coerce, for error reporting."""
+    mask = original.notna() & coerced.isna()
+    if not mask.any():
+        return ""
+    bad = original[mask].iloc[0]
+    text = str(bad)
+    return text if len(text) <= 40 else text[:37] + "..."
+
+
+def _coerce_dtypes(df: pd.DataFrame) -> tuple[pd.DataFrame, list[tuple[str, str, str]]]:
+    """Apply SCHEMA dtypes. Return the coerced frame + a list of mismatches."""
+    df = df.copy()
+    mismatches: list[tuple[str, str, str]] = []
+    for col, (dtype, _group) in SCHEMA.items():
+        if col not in df.columns:
             continue
-        if any(c.startswith(p) or c == p for p in NUMERIC_PREFIXES) \
-                or c in ("year", "month", "accrual_adjustment"):
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df
+        original = df[col]
+        try:
+            coerced = _coerce_series(original, dtype)
+        except Exception as e:  # noqa: BLE001
+            mismatches.append((col, dtype, f"coercion error: {e}"))
+            continue
+        # Detect rows where coercion silently dropped data.
+        if dtype in ("Int64", "float64", "datetime64[ns]"):
+            pre = int(original.notna().sum())
+            post = int(coerced.notna().sum())
+            if post < pre:
+                mismatches.append((col, dtype, _sample_bad_value(original, coerced)))
+        df[col] = coerced
+    return df, mismatches
 
 
 def _add_period(df: pd.DataFrame) -> pd.DataFrame:
@@ -110,9 +148,6 @@ def _add_period(df: pd.DataFrame) -> pd.DataFrame:
                  day=1),
             errors="coerce",
         )
-    for c in ("contract_start", "contract_end"):
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce", format="mixed")
     return df
 
 
@@ -150,8 +185,8 @@ def _to_csv_url(url: str) -> str:
     """Convert a Google Sheets view/publish URL into a direct CSV export URL.
 
     Handles:
-      - `.../pubhtml`            → `.../pub?output=csv`
-      - `.../edit?...gid=N`      → `.../export?format=csv&gid=N`
+      - `.../pubhtml`            -> `.../pub?output=csv`
+      - `.../edit?...gid=N`      -> `.../export?format=csv&gid=N`
     Other URLs are returned unchanged (assumed to already serve CSV).
     """
     if "docs.google.com/spreadsheets" not in url:
@@ -181,8 +216,8 @@ def load(path: str | Path, sheet: str | int = 0) -> tuple[pd.DataFrame, SchemaRe
         are auto-converted to their CSV-export form)
 
     Returns (dataframe, schema_report). The report tells the caller which
-    columns matched, which were missing, and which strategy (header vs
-    position) was used.
+    columns matched, which were missing, which dtype coercions lost data, and
+    which strategy (header vs position) was used.
     """
     src = str(path)
     if _is_url(src):
@@ -200,7 +235,8 @@ def load(path: str | Path, sheet: str | int = 0) -> tuple[pd.DataFrame, SchemaRe
     if not report.matched:
         df, report = _rename_by_position(raw)
 
-    df = _coerce_numeric(df)
+    df, mismatches = _coerce_dtypes(df)
+    report.dtype_mismatches = mismatches
     df = _add_period(df)
     if "period" in df.columns and "cost_center_id" in df.columns:
         df = df.sort_values(["cost_center_id", "period"]).reset_index(drop=True)

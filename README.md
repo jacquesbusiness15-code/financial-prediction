@@ -8,38 +8,33 @@ and generates decision-ready recommendations using the Claude API.
 
 | Page | Purpose |
 |---|---|
-| 🏠 Home | Dataset loader, filters, portfolio KPI snapshot |
-| 📈 Portfolio Overview | Heatmap of CM% by region×month, top cost centers, top-10 anomaly leaderboard |
-| 🔎 Deep Dive | Pick a cost center → CM timeline + **driver waterfall** + KPI vs regional peers + **AI explanation** |
-| ⚠️ Early Warnings | Forward-looking rule-based risk list (declining trend, absence spike, subcontractor creep, renewal risk, plan gap widening) with AI action plans |
-| 💬 Co-Pilot Chat | Natural-language Q&A over the filtered data slice |
+| Home | Dataset loader, filters, portfolio KPI snapshot |
+| Portfolio Overview | Heatmap of CM% by region×month, top cost centers, top-10 anomaly leaderboard |
+| Deep Dive | Pick a cost center -> CM timeline + **driver waterfall** + KPI vs regional peers + **AI explanation** |
+| Early Warnings | Forward-looking rule-based risk list (declining trend, absence spike, subcontractor creep, renewal risk, plan gap widening) with AI action plans |
+| Co-Pilot Chat | Natural-language Q&A over the filtered data slice |
 
-## Two front-ends in this repo
-
-This project ships both the original Streamlit prototype **and** a Next.js
-rewrite backed by a FastAPI API over the same analytics modules in `src/`.
+## Project layout
 
 | Directory   | What it is                                                    |
 |-------------|---------------------------------------------------------------|
-| `src/`      | Analytics pipeline (pandas, scipy, anthropic) — shared        |
-| `app.py` + `pages/` | Original Streamlit multipage app                      |
-| `backend/`  | FastAPI wrapping `src/` as REST + SSE                         |
-| `web/`      | Next.js 15 (App Router, TS, Tailwind, react-plotly.js)        |
+| `src/`      | Analytics pipeline (pandas, scipy, anthropic) + UI helpers    |
+| `app.py`    | Streamlit entry point                                         |
+| `pages/`    | Streamlit multipage screens (Analytics, Forecasts, …)         |
+| `data/`     | Sample datasets                                               |
 
-## Local setup on your machine
+## Local setup
 
 ### Prerequisites
 
 - `Python 3.12+`
-- `Node.js 20+`
-- `pnpm` (Corepack works fine: `corepack enable`)
 
-### 1. Backend environment
+### 1. Environment
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r backend/requirements.txt
+python -m venv .venv
+source .venv/Scripts/activate   # or .venv\Scripts\activate on cmd
+pip install -r requirements.txt
 cp .env.example .env
 ```
 
@@ -49,96 +44,19 @@ Optional:
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-### 2. Frontend environment
+### 2. Run
 
 ```bash
-cd web
-pnpm install
-cd ..
-```
-
-### 3. Run in local development mode
-
-Terminal 1:
-
-```bash
-source .venv/bin/activate
-uvicorn backend.main:app --reload
-```
-
-Terminal 2:
-
-```bash
-cd web
-pnpm dev
-```
-
-Open:
-
-- Frontend: `http://localhost:3000`
-- Backend docs: `http://localhost:8000/docs`
-
-### 4. Run in single-port production-like mode
-
-```bash
-cd web && pnpm build && cd ..
-source .venv/bin/activate
-uvicorn backend.main:app --host 0.0.0.0 --port 8000
-```
-
-Open `http://localhost:8000`.
-
-### 5. Load the provided sample dataset
-
-The app accepts both Excel and CSV files. The supplied CSV in Downloads works:
-
-```text
-/Users/uzair99/Downloads/Dataset_anoym(Datensatz für Test (anonym)).csv
-```
-
-Paste that full path into the app's data-source field, or move the file into
-`data/` and load it from there.
-
-CSV loading now handles non-UTF-8 encodings like `ISO-8859-1`, which was
-required for the provided challenge dataset.
-
-### Streamlit (original)
-
-```bash
-python -m venv .venv && source .venv/Scripts/activate   # or .venv\Scripts\activate on cmd
-pip install -r requirements.txt
-export ANTHROPIC_API_KEY=sk-ant-...                     # optional
 streamlit run app.py
 ```
 
-### Next.js + FastAPI (new) — one server
+### 3. Load the provided sample dataset
 
-The React UI is built as a static bundle (`web/out/`) and served by FastAPI
-alongside the `/api/*` routes. You run **one** process on **one** port.
+The app accepts both Excel and CSV files. Drop a file into `data/` and load it
+from there, or paste a full path into the data-source field.
 
-```bash
-# 1. install deps (once)
-pip install -r backend/requirements.txt
-cd web && pnpm install && pnpm build && cd ..
-export ANTHROPIC_API_KEY=sk-ant-...                     # optional
-
-# 2. run everything
-uvicorn backend.main:app --host 0.0.0.0 --port 8000
-```
-
-Open http://localhost:8000 — landing page, UI, and API all live there.
-Paste a Google Sheets URL or use `data/Dataset_anoym.xlsx`.
-
-**Hot-reload dev mode** (two processes, only if you're hacking on the frontend):
-```bash
-uvicorn backend.main:app --reload                       # :8000
-cd web && pnpm dev                                      # :3000 with live reload
-```
-
-**Docker**:
-```bash
-docker compose up   # single `web` service, port 8000
-```
+CSV loading handles non-UTF-8 encodings like `ISO-8859-1` (required for the
+provided challenge dataset).
 
 Without an `ANTHROPIC_API_KEY` the app still renders every chart and driver —
 the chat streams a single warning message and the AI explanation falls back
@@ -156,10 +74,7 @@ Excel / Google Sheets
                               └── early_warning─┘        │
                                          │               │
                                          ▼               ▼
-                           FastAPI (backend/)  OR  Streamlit (app.py)
-                                         │
-                                         ▼
-                                   Next.js (web/)
+                                   Streamlit (app.py + pages/)
 ```
 
 - **`src/config.py`** — Excel column-letter → semantic-name map (single source of truth)
@@ -170,7 +85,7 @@ Excel / Google Sheets
 - **`src/benchmarks.py`** — historical baseline + regional peer KPI comparison
 - **`src/early_warning.py`** — explainable rule set for proactive risk flags
 - **`src/llm_copilot.py`** — Claude Sonnet 4.6 wrapper with prompt caching; strict rules (cite € values, never invent, distinguish fact vs hypothesis)
-- **`src/viz.py`** — Plotly helpers (waterfall, heatmap, timeline, KPI-vs-peer bullet)
+- **`src/viz_svg.py`** — inline-SVG chart helpers (area, waterfall, heatmap, timeline) used by Streamlit
 
 ## How it scores against the rubric
 

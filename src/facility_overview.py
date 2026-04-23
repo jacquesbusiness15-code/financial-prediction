@@ -20,34 +20,40 @@ from src import drivers
 StatusLevel = Literal["critical", "warn", "healthy"]
 
 
-# --- Driver class → (icon, i18n key prefix, default action key) ---
+# --- Driver class -> (icon, i18n key prefix, default action key) ---
 DRIVER_ICON: dict[str, tuple[str, str, str | None]] = {
-    "labor":         ("👥", "driver.labor",         "shift"),
-    "subcontractor": ("🤝", "driver.subcontractor", "subcontractor"),
-    "absence":       ("❤",  "driver.absence",       "absence"),
-    "training":      ("🎓", "driver.training",      "onboarding"),
-    "material":      ("📦", "driver.material",      "pricing"),
-    "vehicle":       ("🚚", "driver.vehicle",       "pricing"),
-    "revenue":       ("📉", "driver.revenue",       "pricing"),
-    "revenue_up":    ("📈", "driver.revenue_up",    None),
-    "other":         ("•",  "driver.other",         None),
+    "labor":         ("", "driver.labor",         "shift"),
+    "subcontractor": ("", "driver.subcontractor", "subcontractor"),
+    "absence":       ("", "driver.absence",       "absence"),
+    "training":      ("", "driver.training",      "onboarding"),
+    "material":      ("", "driver.material",      "pricing"),
+    "vehicle":       ("", "driver.vehicle",       "pricing"),
+    "revenue":       ("", "driver.revenue",       "pricing"),
+    "revenue_up":    ("", "driver.revenue_up",    None),
+    "other":         ("", "driver.other",         None),
 }
 
 
 # --- Action catalogue with estimated impact (ratio points, e.g. 0.032 = +3.2 pp) ---
 ACTIONS: dict[str, dict] = {
-    "shift":         {"icon": "🗓", "title_key": "action.shift.title",
-                      "sub_key": "action.shift.sub", "impact": 0.032},
-    "absence":       {"icon": "👥", "title_key": "action.absence.title",
-                      "sub_key": "action.absence.sub", "impact": 0.015},
-    "onboarding":    {"icon": "🚀", "title_key": "action.onboarding.title",
-                      "sub_key": "action.onboarding.sub", "impact": 0.008},
-    "subcontractor": {"icon": "🤝", "title_key": "action.subcontractor.title",
-                      "sub_key": "action.subcontractor.sub", "impact": 0.020},
-    "pricing":       {"icon": "🏷", "title_key": "action.pricing.title",
-                      "sub_key": "action.pricing.sub", "impact": 0.025},
-    "productivity":  {"icon": "⚡", "title_key": "action.productivity.title",
-                      "sub_key": "action.productivity.sub", "impact": 0.012},
+    "shift":         {"icon": "", "title_key": "action.shift.title",
+                      "sub_key": "action.shift.sub",
+                      "why_key": "action.shift.why", "impact": 0.032},
+    "absence":       {"icon": "", "title_key": "action.absence.title",
+                      "sub_key": "action.absence.sub",
+                      "why_key": "action.absence.why", "impact": 0.015},
+    "onboarding":    {"icon": "", "title_key": "action.onboarding.title",
+                      "sub_key": "action.onboarding.sub",
+                      "why_key": "action.onboarding.why", "impact": 0.008},
+    "subcontractor": {"icon": "", "title_key": "action.subcontractor.title",
+                      "sub_key": "action.subcontractor.sub",
+                      "why_key": "action.subcontractor.why", "impact": 0.020},
+    "pricing":       {"icon": "", "title_key": "action.pricing.title",
+                      "sub_key": "action.pricing.sub",
+                      "why_key": "action.pricing.why", "impact": 0.025},
+    "productivity":  {"icon": "", "title_key": "action.productivity.title",
+                      "sub_key": "action.productivity.sub",
+                      "why_key": "action.productivity.why", "impact": 0.012},
 }
 
 
@@ -91,22 +97,7 @@ def status_for(margin: float | None, mom: float | None) -> StatusLevel:
 
 
 def emoji_for(service: str | None, name: str | None) -> str:
-    s = f"{service or ''} {name or ''}".lower()
-    if "airport" in s or "flughafen" in s or "flug" in s:
-        return "✈"
-    if "klinik" in s or "hospital" in s or "medi" in s:
-        return "🏥"
-    if "sicher" in s or "security" in s:
-        return "🛡"
-    if "reinig" in s or "clean" in s:
-        return "🧹"
-    if "cater" in s or "verpfleg" in s:
-        return "🍽"
-    if "bau" in s or "technik" in s or "maintenance" in s:
-        return "🛠"
-    if "schul" in s or "schule" in s or "bildung" in s:
-        return "🎓"
-    return "🏢"
+    return ""
 
 
 def sparkline_values(hist: pd.DataFrame, n: int = 6) -> list[float]:
@@ -117,6 +108,42 @@ def sparkline_values(hist: pd.DataFrame, n: int = 6) -> list[float]:
     rev = tail["revenue_total"].where(tail["revenue_total"] != 0, pd.NA)
     m = (tail["cm_db"] / rev).fillna(0.0)
     return [float(v) for v in m.tolist()]
+
+
+def category_series(focus: pd.DataFrame, category: str, n: int = 12
+                    ) -> tuple[list[float], list[pd.Timestamp]]:
+    """Return (values, periods) for the last ``n`` months of one category.
+
+    ``focus`` is expected to be a single-cost-center frame, sorted by period.
+    ``category`` is one of:
+      - "revenue" -> ``revenue_total``
+      - "costs"   -> ``revenue_total - cm_db``
+      - "cm"      -> ``cm_db``
+    """
+    if focus.empty or "revenue_total" not in focus.columns or "cm_db" not in focus.columns:
+        return [], []
+    tail = focus.tail(n).copy()
+    rev = tail["revenue_total"].fillna(0.0)
+    cm = tail["cm_db"].fillna(0.0)
+    if category == "revenue":
+        vals = rev
+    elif category == "costs":
+        vals = rev - cm
+    else:  # "cm"
+        vals = cm
+    return [float(v) for v in vals.tolist()], list(tail["period"].tolist())
+
+
+def linear_trend(values: list[float]) -> list[float]:
+    """Fit a least-squares line to ``values`` over x = 0..n-1 and return ys."""
+    import numpy as np
+
+    n = len(values)
+    if n < 2:
+        return list(values)
+    x = np.arange(n, dtype=float)
+    m, b = np.polyfit(x, np.array(values, dtype=float), 1)
+    return [float(m * i + b) for i in range(n)]
 
 
 def pick_focus_cost_center(df: pd.DataFrame, override: str | None = None) -> str | None:
@@ -217,6 +244,36 @@ def worst_drivers_for(current: pd.Series, baseline: pd.Series,
             pct_change=driver_pct_change(d),
             delta_eur=d.delta_eur,
         ))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def worst_cost_drivers(current: pd.Series, baseline: pd.Series,
+                       limit: int = 3) -> list[drivers.Driver]:
+    """Top ``limit`` cost drivers whose EUR rose the most MoM.
+
+    Unlike ``worst_drivers_for``, this filters to ``kind='cost'`` and
+    ranks by the increase in that cost line's EUR (current - baseline),
+    not by margin contribution. Revenue drops are intentionally excluded
+    so the UI can show a pure "what drove cost up?" view.
+
+    ``delta_eur`` on a cost driver is already ``-(cost_cur - cost_base)``,
+    so a larger cost increase appears as a more-negative ``delta_eur`` —
+    ranking ascending gives us the biggest-increase-first order.
+    """
+    all_drivers = drivers.decompose(current, baseline)
+    cost_only = [d for d in all_drivers
+                 if d.kind == "cost" and d.current > d.baseline]
+    cost_only.sort(key=lambda d: d.delta_eur)
+    out: list[drivers.Driver] = []
+    seen: set[str] = set()
+    for d in cost_only:
+        cls = classify_driver(d)
+        if cls in seen or cls not in DRIVER_ICON:
+            continue
+        seen.add(cls)
+        out.append(d)
         if len(out) >= limit:
             break
     return out

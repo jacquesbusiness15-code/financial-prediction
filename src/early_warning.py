@@ -12,7 +12,7 @@ import pandas as pd
 
 def _latest_per_cc(df: pd.DataFrame) -> pd.DataFrame:
     return (df.sort_values("period")
-              .groupby("cost_center_id", sort=False)
+              .groupby("cost_center_id", sort=False, observed=True)
               .tail(1))
 
 
@@ -33,7 +33,7 @@ def detect(df: pd.DataFrame) -> pd.DataFrame:
     signals: list[dict] = []
     df_sorted = df.sort_values(["cost_center_id", "period"])
 
-    for cc_id, grp in df_sorted.groupby("cost_center_id", sort=False):
+    for cc_id, grp in df_sorted.groupby("cost_center_id", sort=False, observed=True):
         if grp.empty:
             continue
         latest = grp.iloc[-1]
