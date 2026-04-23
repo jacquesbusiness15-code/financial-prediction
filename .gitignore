@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+data/*.xlsx
+data/*.xls
+data/*.csv
+!data/.gitkeep
+.streamlit/secrets.toml
+.DS_Store
+*.egg-info/
+
+# Next.js / web
+web/node_modules/
+web/.next/
+web/out/
+web/.env.local
+web/.env.*.local
+web/next-env.d.ts.bak
+
+# Streamlit uploads
+.streamlit_upload*.xlsx
+.streamlit_upload*.csv
+.streamlit_upload*.xls

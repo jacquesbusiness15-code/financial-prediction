@@ -1,0 +1,187 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+html, body {
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif;
+  color: #1D1D1B;
+  background: #F5F5F5;
+  min-height: 100vh;
+}
+
+@layer components {
+  /* --- Cards --- */
+  .wisag-card {
+    @apply bg-white border border-wisag-gray300 rounded-xl p-5 shadow-sm;
+  }
+  .wisag-card-accent {
+    @apply border-l-4 border-l-wisag-orange;
+  }
+  .wisag-section-card {
+    @apply bg-white border border-wisag-gray300 rounded-xl p-6 shadow-sm;
+  }
+
+  /* --- Pills & badges --- */
+  .wisag-badge {
+    @apply inline-block px-2.5 py-0.5 rounded-full text-xs font-semibold tracking-wide align-middle;
+  }
+  .wisag-badge-high   { background: #FFCDD2; color: #B71C1C; }
+  .wisag-badge-medium { background: #FFE0B2; color: #8A4A00; }
+  .wisag-badge-low    { background: #C8E6C9; color: #1B5E20; }
+
+  .wisag-pill {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded font-semibold tabular-nums text-sm;
+  }
+  .wisag-pill-pos { background: #C8E6C9; color: #1B5E20; }
+  .wisag-pill-neg { background: #FFCDD2; color: #B71C1C; }
+  .wisag-pill-neu { background: #F5F5F5; color: #6B6B6B; }
+
+  /* Status pill with colored dot, e.g. ● Critical */
+  .wisag-status-pill {
+    @apply inline-flex items-center gap-1.5 text-xs font-semibold;
+  }
+  .wisag-status-pill::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 9999px;
+    display: inline-block;
+  }
+  .wisag-status-critical { color: #B71C1C; }
+  .wisag-status-critical::before { background: #C62828; }
+  .wisag-status-warn     { color: #8A4A00; }
+  .wisag-status-warn::before     { background: #F57C00; }
+  .wisag-status-healthy  { color: #1B5E20; }
+  .wisag-status-healthy::before  { background: #2E7D32; }
+
+  /* --- Icon tile (44×44 tinted rounded square) --- */
+  .wisag-icon-tile {
+    @apply inline-flex items-center justify-center rounded-lg shrink-0;
+    width: 44px;
+    height: 44px;
+    font-size: 20px;
+    line-height: 1;
+  }
+  .wisag-icon-tile-purple { background: #EDE4FA; color: #4A148C; }
+  .wisag-icon-tile-orange { background: #FDE6DC; color: #C63D0F; }
+  .wisag-icon-tile-red    { background: #FFE3E6; color: #B71C1C; }
+  .wisag-icon-tile-green  { background: #DCEFE0; color: #1B5E20; }
+  .wisag-icon-tile-blue   { background: #E3ECFA; color: #1E3A8A; }
+  .wisag-icon-tile-gray   { background: #F0F0F0; color: #6B6B6B; }
+  .wisag-icon-tile-sm {
+    width: 36px;
+    height: 36px;
+    font-size: 16px;
+  }
+
+  /* --- Rows (driver / action list items) --- */
+  .wisag-row {
+    @apply flex items-center gap-3 py-3;
+  }
+  .wisag-row-title {
+    @apply text-sm font-semibold text-wisag-navy;
+  }
+  .wisag-row-sub {
+    @apply text-xs text-wisag-gray600 mt-0.5;
+  }
+  .wisag-row-pct {
+    @apply tabular-nums font-semibold text-sm;
+  }
+  .wisag-row-pct-pos { color: #1B5E20; }
+  .wisag-row-pct-neg { color: #B71C1C; }
+  .wisag-row-chev {
+    @apply text-wisag-gray500 text-lg select-none;
+  }
+
+  /* --- Section header (title + subtitle + optional hint on the right) --- */
+  .wisag-section-head {
+    @apply flex items-start justify-between mb-1;
+  }
+  .wisag-section-title {
+    @apply text-base font-semibold text-wisag-navy m-0;
+  }
+  .wisag-section-sub {
+    @apply text-xs text-wisag-gray600 m-0 mt-0.5;
+  }
+  .wisag-section-hint {
+    @apply text-xs text-wisag-gray600;
+  }
+
+  /* --- KPI tiles --- */
+  .wisag-kpi-label {
+    @apply text-xs font-medium uppercase tracking-wider text-wisag-gray600;
+  }
+  .wisag-kpi-value {
+    @apply text-3xl font-bold text-wisag-navy tabular-nums;
+  }
+  .wisag-kpi-delta {
+    @apply text-xs font-semibold mt-0.5 tabular-nums;
+  }
+
+  /* --- Buttons / inputs --- */
+  .wisag-primary-btn {
+    @apply bg-wisag-orange text-white font-semibold rounded-md px-4 py-2
+      border border-wisag-orange hover:bg-wisag-orangeDark hover:border-wisag-orangeDark
+      disabled:opacity-60 disabled:cursor-not-allowed transition;
+  }
+  .wisag-secondary-btn {
+    @apply bg-white text-wisag-navy font-medium rounded-md px-4 py-2
+      border border-wisag-gray300 hover:border-wisag-orange hover:text-wisag-orange transition;
+  }
+  .wisag-input {
+    @apply w-full rounded-md border border-wisag-gray300 px-3 py-2 text-sm
+      focus:outline-none focus:border-wisag-orange focus:ring-1 focus:ring-wisag-orange;
+  }
+  .wisag-number-input {
+    @apply text-center font-semibold text-lg rounded-md border border-wisag-gray300 px-2 py-2
+      w-20 focus:outline-none focus:border-wisag-orange focus:ring-1 focus:ring-wisag-orange
+      tabular-nums;
+  }
+
+  /* --- Breadcrumb / "back to overview" --- */
+  .wisag-breadcrumb {
+    @apply inline-flex items-center gap-1 text-sm text-wisag-gray600 hover:text-wisag-orange transition;
+  }
+
+  /* --- Nav card (home grid tile) --- */
+  .wisag-nav-card {
+    @apply bg-white border border-wisag-gray300 rounded-xl p-5 transition block
+      hover:border-wisag-orange hover:-translate-y-0.5 hover:shadow-sm;
+  }
+
+  /* --- Explore-more CTA card (right side of What-if) --- */
+  .wisag-explore-card {
+    @apply flex items-start gap-3 rounded-xl p-4 transition cursor-pointer;
+    background: #F4EEF9;
+    border: 1px solid #E6D6F5;
+  }
+  .wisag-explore-card:hover { background: #ECDFFA; }
+
+  /* --- Ask AI sidebar button --- */
+  .wisag-ask-ai {
+    @apply flex items-center justify-between gap-2 w-full rounded-md px-3 py-2 text-sm font-semibold
+      bg-white text-wisag-orange border border-wisag-orange hover:bg-wisag-orangeLight transition;
+  }
+
+  /* --- Mini sparkline container --- */
+  .wisag-trend-chart-mini {
+    height: 80px;
+    width: 100%;
+  }
+}
+
+/* Sidebar scrollbar */
+.sidebar-scroll::-webkit-scrollbar { width: 6px; }
+.sidebar-scroll::-webkit-scrollbar-thumb { background: #E5E5E5; border-radius: 3px; }
+
+/* Remove arrows from number inputs for what-if simulator */
+input[type='number'].wisag-number-input::-webkit-outer-spin-button,
+input[type='number'].wisag-number-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type='number'].wisag-number-input {
+  -moz-appearance: textfield;
+}
