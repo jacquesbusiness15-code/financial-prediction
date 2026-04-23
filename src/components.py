@@ -67,10 +67,30 @@ def page_header(title_key: str, subtitle_key: str | None = None,
         st.caption(t(subtitle_key))
 
 
+def language_switcher() -> None:
+    """Render a compact DE/EN language toggle in the sidebar.
+
+    Binds to st.session_state["lang"] via the widget `key`, so changes are
+    picked up automatically by i18n.get_lang() on the next rerun.
+    """
+    if "lang" not in st.session_state:
+        st.session_state["lang"] = "de"
+    with st.sidebar:
+        st.radio(
+            t("sidebar.language"),
+            options=["de", "en"],
+            key="lang",
+            format_func=lambda code: t(f"lang.{code}"),
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+
+
 def sidebar_logo() -> None:
-    """Render the logo at the top of the sidebar."""
+    """Render the logo and language switcher at the top of the sidebar."""
     with st.sidebar:
         _render_logo(width_px=120)
+    language_switcher()
 
 
 # ---------------------------------------------------------------------------
