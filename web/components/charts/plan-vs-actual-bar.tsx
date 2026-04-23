@@ -8,7 +8,7 @@ export function PlanVsActualBar({ months }: { months: PlanVsActualMonth[] }) {
   if (!months.length) return <p className="text-wisag-gray600 text-sm">—</p>;
   const x = months.map((m) => m.period);
   const y = months.map((m) => m.gap_eur);
-  const colors = y.map((v) => (v < -50_000 ? '#C62828' : v > 50_000 ? '#2E7D32' : '#9E9E9E'));
+  const colors = y.map((v) => (v < -50_000 ? '#FF6B7A' : v > 50_000 ? '#7BFF86' : '#7F8AA3'));
 
   return (
     <div className="w-full" style={{ height: 380 }}>
@@ -25,7 +25,7 @@ export function PlanVsActualBar({ months }: { months: PlanVsActualMonth[] }) {
         layout={{
           title: { text: 'Monatliche DB-Abweichung (Ist − Plan, €)' },
           showlegend: false,
-          yaxis: { title: { text: '€' }, zeroline: true, zerolinecolor: '#9E9E9E' },
+          yaxis: { title: { text: '€' }, zeroline: true, zerolinecolor: 'rgba(255,255,255,0.16)' },
           margin: { l: 60, r: 20, t: 60, b: 60 },
         }}
       />

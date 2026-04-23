@@ -53,16 +53,20 @@ function DeepDiveInner() {
   const [cc, setCc] = useState<string | null>(ccFromUrl);
 
   useEffect(() => {
+    setCc(ccFromUrl);
+  }, [ccFromUrl]);
+
+  useEffect(() => {
     if (!cc && costCenters.length) setCc(costCenters[0].id);
   }, [cc, costCenters]);
 
   useEffect(() => {
-    if (cc) {
+    if (cc && cc !== ccFromUrl) {
       const sp = new URLSearchParams(params.toString());
       sp.set('cc', cc);
       router.replace(`/deep-dive?${sp.toString()}`);
     }
-  }, [cc]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cc, ccFromUrl, params, router]);
 
   const overviewQuery = useQuery({
     queryKey: ['facility-overview', dataset?.dataset_id, cc],
@@ -119,13 +123,20 @@ function DeepDiveInner() {
   });
 
   return (
-    <div className="space-y-5">
+    <div className="app-page">
       {/* Topbar */}
-      <header className="flex items-center justify-between gap-4">
-        <Link href="/" className="wisag-breadcrumb">
-          {t('overview.back')}
-        </Link>
-        <div className="flex items-center gap-3">
+      <header className="app-header">
+        <div>
+          <Link href="/" className="wisag-breadcrumb">
+            {t('overview.back')}
+          </Link>
+          <div className="app-kicker mt-3">Operational diagnosis</div>
+          <h1 className="app-title">Deep Dive</h1>
+          <p className="app-subtitle">
+            Inspect one cost center in detail, understand the margin bridge, and test improvement scenarios.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
           <select
             className="wisag-input max-w-[14rem]"
             value={cc ?? ''}
@@ -320,4 +331,3 @@ function DeepDiveInner() {
     </div>
   );
 }
-

@@ -17,7 +17,9 @@ export function AnomalyCard({ row }: { row: AnomalyRow }) {
             <span className="font-semibold text-wisag-navy truncate">
               {row.cost_center_name || row.cost_center_id}
             </span>
-            <span className="text-xs text-wisag-gray600">· {row.cost_center_id}</span>
+            <span className="rounded-full bg-white/[0.05] px-2 py-0.5 text-[11px] text-wisag-gray600">
+              {row.cost_center_id}
+            </span>
           </div>
           <div className="text-xs text-wisag-gray600 mb-2">
             {row.region ?? '—'}

@@ -40,7 +40,7 @@ export function WarningCard({ row, selected, onSelect }: Props) {
         onClick={onSelect}
         className={clsx(
           'wisag-card wisag-card-accent w-full text-left transition',
-          selected ? 'border-wisag-orange ring-2 ring-wisag-orangeLight' : '',
+          selected ? 'border-wisag-orange ring-2 ring-wisag-orange/20' : '',
         )}
       >
         {content}

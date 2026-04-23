@@ -28,6 +28,14 @@ export function WhatIfSimulator({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    setBaseline(initialBl);
+    setTarget(initialNew);
+    setResult(null);
+    setError(null);
+  }, [initialBl, initialNew, costCenterId, datasetId]);
+
+  useEffect(() => {
+    let cancelled = false;
     const id = setTimeout(async () => {
       try {
         const res = await api.simulateTeamSize(datasetId, {
@@ -36,13 +44,20 @@ export function WhatIfSimulator({
           baseline_headcount: baseline,
           period: period ?? null,
         });
-        setResult(res);
-        setError(null);
+        if (!cancelled) {
+          setResult(res);
+          setError(null);
+        }
       } catch (e) {
-        setError((e as Error).message);
+        if (!cancelled) {
+          setError((e as Error).message);
+        }
       }
     }, 250);
-    return () => clearTimeout(id);
+    return () => {
+      cancelled = true;
+      clearTimeout(id);
+    };
   }, [datasetId, costCenterId, target, baseline, period]);
 
   return (
@@ -54,7 +69,7 @@ export function WhatIfSimulator({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-[3fr_2fr_2fr] gap-6 items-center mt-4">
+      <div className="grid grid-cols-1 gap-6 mt-4 md:grid-cols-[3fr_2fr_2fr] md:items-center">
         <div>
           <div className="flex items-end gap-3">
             <div>

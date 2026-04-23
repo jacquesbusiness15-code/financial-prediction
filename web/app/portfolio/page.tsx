@@ -26,10 +26,14 @@ export default function PortfolioPage() {
   if (!dataset) return <EmptyState />;
 
   return (
-    <div className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-bold text-wisag-navy">{t('portfolio.title')}</h1>
-        <p className="text-wisag-gray600">{t('portfolio.subtitle')}</p>
+    <div className="app-page">
+      <header className="app-header">
+        <div>
+          <div className="app-kicker">Portfolio monitor</div>
+          <h1 className="app-title">{t('portfolio.title')}</h1>
+          <p className="app-subtitle">{t('portfolio.subtitle')}</p>
+        </div>
+        <div className="eyebrow-chip">Heatmap + anomalies + revenue leaders</div>
       </header>
 
       {query.isLoading && <p className="text-wisag-gray600">Laden…</p>}
@@ -41,7 +45,7 @@ export default function PortfolioPage() {
 
       {query.data && (
         <>
-          <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
+          <section className="grid grid-cols-2 gap-4 xl:grid-cols-5">
             <KpiTile label={t('kpi.revenue')}      value={formatEur(query.data.kpis.revenue)} />
             <KpiTile label={t('kpi.cm')}           value={formatEur(query.data.kpis.cm_db)} />
             <KpiTile label={t('kpi.cm_planned')}   value={formatEur(query.data.kpis.cm_planned)} />
@@ -57,16 +61,16 @@ export default function PortfolioPage() {
             />
           </section>
 
-          <section className="wisag-card">
+          <section className="hero-panel">
             <p className="text-xs text-wisag-gray600 mb-2">{t('portfolio.heatmap_legend')}</p>
             <HeatmapPlot data={query.data.heatmap} />
           </section>
 
-          <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <section className="grid grid-cols-1 gap-6 lg:grid-cols-3">
             <div className="wisag-card lg:col-span-1">
               <h2 className="font-semibold text-wisag-navy mb-3">{t('portfolio.top_cc')}</h2>
-              <table className="w-full text-sm">
-                <thead className="text-wisag-gray600 text-left">
+              <table className="dashboard-table">
+                <thead>
                   <tr>
                     <th className="font-medium py-1">Kostenstelle</th>
                     <th className="font-medium py-1 text-right">Umsatz</th>

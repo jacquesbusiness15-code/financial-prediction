@@ -6,13 +6,25 @@ import type { Data, Layout, Config } from 'plotly.js-dist-min';
 // Dynamically import so Plotly never runs during SSR.
 const Plot = dynamic(() => import('react-plotly.js'), { ssr: false });
 
-export const FONT = { family: 'Inter, system-ui, sans-serif', color: '#1D1D1B' };
+export const FONT = { family: 'Manrope, Inter, system-ui, sans-serif', color: '#DDE6F7' };
 
 export const BASE_LAYOUT: Partial<Layout> = {
-  plot_bgcolor: '#FFFFFF',
-  paper_bgcolor: '#FFFFFF',
+  plot_bgcolor: 'transparent',
+  paper_bgcolor: 'transparent',
   font: FONT,
   margin: { l: 40, r: 20, t: 60, b: 40 },
+  xaxis: {
+    gridcolor: 'rgba(255,255,255,0.08)',
+    zerolinecolor: 'rgba(255,255,255,0.14)',
+    linecolor: 'rgba(255,255,255,0.16)',
+    tickfont: { color: '#A6B1C6' },
+  },
+  yaxis: {
+    gridcolor: 'rgba(255,255,255,0.08)',
+    zerolinecolor: 'rgba(255,255,255,0.14)',
+    linecolor: 'rgba(255,255,255,0.16)',
+    tickfont: { color: '#A6B1C6' },
+  },
 };
 
 export const BASE_CONFIG: Partial<Config> = {

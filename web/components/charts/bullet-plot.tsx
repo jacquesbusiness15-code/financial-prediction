@@ -29,7 +29,7 @@ export function BulletPlot({ kpis }: { kpis: PeerKpi[] }) {
             mode: 'markers',
             name: 'Regionaler Peer-Median',
             y, x: peerMedian,
-            marker: { color: '#1D1D1B', symbol: 'line-ns-open', size: 18, line: { width: 3 } },
+            marker: { color: '#6FB4FF', symbol: 'line-ns-open', size: 18, line: { width: 3 } },
           },
         ]}
         layout={{

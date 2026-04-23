@@ -23,10 +23,13 @@ export function DatasetSource() {
   const report = dataset?.schema_report;
 
   return (
-    <section className="border-t border-wisag-gray200 pt-4">
-      <h3 className="text-xs font-semibold text-wisag-gray600 uppercase tracking-wider mb-2">
+    <section className="border-t border-white/10 pt-4">
+      <h3 className="text-xs font-semibold text-wisag-gray600 uppercase tracking-[0.24em] mb-2">
         {t('sidebar.data_source')}
       </h3>
+      <p className="mb-3 text-xs leading-5 text-wisag-gray600">
+        Paste a Google Sheets link or any local `.csv` / `.xlsx` path. Absolute paths work too.
+      </p>
       <form onSubmit={submit} className="space-y-2">
         <input
           type="text"
@@ -43,6 +46,15 @@ export function DatasetSource() {
           {mutation.isPending ? '…' : t('sidebar.load')}
         </button>
       </form>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <button
+          type="button"
+          className="rounded-full border border-white/10 px-3 py-1 text-xs text-wisag-gray600 transition hover:border-wisag-orange hover:text-white"
+          onClick={() => setSource('data/Dataset_anoym.xlsx')}
+        >
+          Use repo sample path
+        </button>
+      </div>
       {mutation.isError && (
         <p className="mt-2 text-xs text-neg-dark">
           {t('data.load_failed', { err: (mutation.error as Error).message })}
@@ -50,7 +62,7 @@ export function DatasetSource() {
       )}
 
       {dataset && report && (
-        <div className="mt-3 text-xs">
+        <div className="mt-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-xs">
           {report.ok ? (
             <p className="text-pos-dark">
               {t('data.schema_ok', { m: report.matched.length, t: report.expected_total })}

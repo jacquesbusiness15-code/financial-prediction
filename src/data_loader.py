@@ -6,6 +6,8 @@ when no headers are recognized — keeps legacy files working).
 """
 from __future__ import annotations
 
+import csv
+import io
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,13 +112,30 @@ def _add_period(df: pd.DataFrame) -> pd.DataFrame:
         )
     for c in ("contract_start", "contract_end"):
         if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
+            df[c] = pd.to_datetime(df[c], errors="coerce", format="mixed")
     return df
 
 
 def _read_any(path: Path, sheet: str | int) -> pd.DataFrame:
     suffix = path.suffix.lower()
     if suffix == ".csv":
+        encodings = ("utf-8", "utf-8-sig", "iso-8859-1", "cp1252")
+        last_error: Exception | None = None
+        for encoding in encodings:
+            try:
+                raw = path.read_text(encoding=encoding)
+                sample = raw[:8192]
+                delimiter = ","
+                try:
+                    dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+                    delimiter = dialect.delimiter
+                except csv.Error:
+                    pass
+                return pd.read_csv(io.StringIO(raw), sep=delimiter)
+            except UnicodeDecodeError as e:
+                last_error = e
+        if last_error is not None:
+            raise last_error
         return pd.read_csv(path)
     if suffix in (".xlsx", ".xls"):
         return pd.read_excel(path, sheet_name=sheet, engine="openpyxl", header=0)

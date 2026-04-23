@@ -39,8 +39,8 @@ export function MiniTrendChart({
     `L${poly} ` +
     `L${xs[n - 1].toFixed(1)},${(height - padB).toFixed(1)} Z`;
 
-  const stroke = declining ? '#C62828' : '#2E7D32';
-  const fill = declining ? 'rgba(198,40,40,0.18)' : 'rgba(46,125,50,0.18)';
+  const stroke = declining ? '#FF6B7A' : '#7BFF86';
+  const fill = declining ? 'rgba(255,107,122,0.18)' : 'rgba(123,255,134,0.18)';
 
   const pct = (v: number) => `${(v * 100).toFixed(0)}%`;
   const yMaxLabel = pct(hi);
@@ -61,7 +61,7 @@ export function MiniTrendChart({
       preserveAspectRatio="none"
       aria-hidden
     >
-      <g fontFamily="Inter, system-ui, sans-serif" fontSize={10} fill="#6B6B6B">
+      <g fontFamily="Manrope, Inter, system-ui, sans-serif" fontSize={10} fill="#A6B1C6">
         <text x={chartWidth + 4} y={padT + 4}>{yMaxLabel}</text>
         <text x={chartWidth + 4} y={padT + yRange / 2 + 4}>{yMidLabel}</text>
         <text x={chartWidth + 4} y={padT + yRange + 4}>{yMinLabel}</text>
@@ -77,7 +77,7 @@ export function MiniTrendChart({
           fill={stroke}
         />
       ))}
-      <g fontFamily="Inter, system-ui, sans-serif" fontSize={10} fill="#6B6B6B" textAnchor="middle">
+      <g fontFamily="Manrope, Inter, system-ui, sans-serif" fontSize={10} fill="#A6B1C6" textAnchor="middle">
         {points.map((p, i) => (
           <text key={i} x={xs[i]} y={height - 4}>{monthOf(p.period)}</text>
         ))}

@@ -69,6 +69,11 @@ export default function ChatPage() {
         },
       );
     } catch (e) {
+      setMessages((prev) => {
+        const copy = prev.slice();
+        copy[copy.length - 1] = { role: 'assistant', content: `⚠️ ${(e as Error).message}` };
+        return copy;
+      });
       setStreaming(false);
     }
   };
@@ -76,14 +81,18 @@ export default function ChatPage() {
   if (!dataset) return <EmptyState />;
 
   return (
-    <div className="space-y-4 flex flex-col h-[calc(100vh-3rem)]">
-      <header>
-        <h1 className="text-2xl font-bold text-wisag-navy">{t('chat.title')}</h1>
-        <p className="text-wisag-gray600">{t('chat.subtitle')}</p>
+    <div className="app-page flex h-[calc(100vh-3rem)] flex-col">
+      <header className="app-header">
+        <div>
+          <div className="app-kicker">Natural-language analysis</div>
+          <h1 className="app-title">{t('chat.title')}</h1>
+          <p className="app-subtitle">{t('chat.subtitle')}</p>
+        </div>
+        <div className="eyebrow-chip">Filtered dataset context is included</div>
       </header>
 
       {messages.length === 0 && (
-        <div className="wisag-card">
+        <div className="hero-panel">
           <div className="font-semibold text-wisag-navy mb-1">{t('chat.try_asking')}</div>
           <div className="text-sm text-wisag-gray600 whitespace-pre-line">
             {t('chat.examples')}
@@ -116,7 +125,7 @@ export default function ChatPage() {
 
       <form
         onSubmit={(e) => { e.preventDefault(); send(); }}
-        className="flex items-center gap-2"
+        className="hero-panel flex items-center gap-2"
       >
         <input
           type="text"

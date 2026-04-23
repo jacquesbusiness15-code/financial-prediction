@@ -4,9 +4,9 @@ import type { HeatmapPayload } from '@/lib/types';
 import { PlotlyChart } from './plotly-chart';
 
 const HEATMAP_SCALE: [number, string][] = [
-  [0, '#C62828'],
-  [0.5, '#FFF59D'],
-  [1, '#2E7D32'],
+  [0, '#FF6B7A'],
+  [0.5, '#FFBE5C'],
+  [1, '#7BFF86'],
 ];
 
 export function HeatmapPlot({ data }: { data: HeatmapPayload }) {
@@ -30,7 +30,7 @@ export function HeatmapPlot({ data }: { data: HeatmapPayload }) {
             colorscale: HEATMAP_SCALE,
             zmin: -0.1,
             zmax: 0.25,
-            colorbar: { title: { text: 'DB %' } },
+            colorbar: { title: { text: 'DB %' }, tickfont: { color: '#A6B1C6' } },
             hovertemplate: '%{y}<br>%{x}<br>DB %%: %{z:.1%}<extra></extra>',
           } as any,
         ]}

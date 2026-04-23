@@ -26,10 +26,14 @@ export default function PlanVsActualPage() {
   if (!dataset) return <EmptyState />;
 
   return (
-    <div className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-bold text-wisag-navy">{t('pva.title')}</h1>
-        <p className="text-wisag-gray600">{t('pva.subtitle')}</p>
+    <div className="app-page">
+      <header className="app-header">
+        <div>
+          <div className="app-kicker">Performance tracking</div>
+          <h1 className="app-title">{t('pva.title')}</h1>
+          <p className="app-subtitle">{t('pva.subtitle')}</p>
+        </div>
+        <div className="eyebrow-chip">Monthly gap view</div>
       </header>
 
       {query.isLoading && <p className="text-wisag-gray600">Laden…</p>}
@@ -45,7 +49,7 @@ export default function PlanVsActualPage() {
 
       {query.data && query.data.months.length > 0 && (
         <>
-          <section className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <section className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <KpiTile label={t('kpi.total_actual')}  value={formatEur(query.data.total_actual)} />
             <KpiTile label={t('kpi.total_planned')} value={formatEur(query.data.total_planned)} />
             <KpiTile
@@ -56,7 +60,7 @@ export default function PlanVsActualPage() {
             <KpiTile label={t('kpi.worst_month')} value={query.data.worst_month ?? '—'} />
           </section>
 
-          <section className="wisag-card">
+          <section className="hero-panel">
             <PlanVsActualBar months={query.data.months} />
             <p className="text-xs text-wisag-gray600 mt-1">{t('pva.chart_caption')}</p>
           </section>
@@ -64,8 +68,8 @@ export default function PlanVsActualPage() {
           <section className="wisag-card">
             <h2 className="font-semibold text-wisag-navy mb-2">{t('pva.table_title')}</h2>
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="text-wisag-gray600 text-left">
+              <table className="dashboard-table">
+                <thead>
                   <tr>
                     <th className="font-medium py-1">{t('pva.col.month')}</th>
                     <th className="font-medium py-1 text-right">{t('pva.col.revenue')}</th>

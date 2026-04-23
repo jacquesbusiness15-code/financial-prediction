@@ -10,12 +10,16 @@ export function FacilityHeader({ data }: { data: FacilityOverviewResponse }) {
   const momPos = typeof mom === 'number' && mom > 0;
 
   return (
-    <section className="wisag-card">
-      <div className="grid grid-cols-1 md:grid-cols-[2fr_1fr_1fr_2fr] gap-5 items-center">
+    <section className="hero-panel">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <span className="eyebrow-chip">Facility signal</span>
+        <span className="text-xs uppercase tracking-[0.24em] text-wisag-gray600">{data.period}</span>
+      </div>
+      <div className="mt-5 grid grid-cols-1 gap-5 md:grid-cols-[2fr_1fr_1fr_2fr] md:items-center">
         <div className="flex items-center gap-4 min-w-0">
-          <IconTile icon={data.icon} tint="purple" />
+          <IconTile icon={data.icon} tint="purple" className="ring-1 ring-white/10" />
           <div className="min-w-0">
-            <h2 className="text-xl font-bold text-wisag-navy truncate">
+            <h2 className="text-2xl font-bold text-wisag-navy truncate">
               {data.cost_center_name ?? data.cost_center_id}
             </h2>
             <p className="text-sm text-wisag-gray600 truncate">{data.region ?? '—'}</p>

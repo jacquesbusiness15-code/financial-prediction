@@ -17,7 +17,7 @@ export function DriverRow({
   variant: 'pos' | 'neg';
 }) {
   return (
-    <div className="wisag-row">
+    <div className="wisag-row rounded-2xl px-2 transition hover:bg-white/[0.04]">
       <IconTile icon={icon} tint={tint} />
       <div className="flex-1 min-w-0">
         <div className="wisag-row-title truncate">{title}</div>

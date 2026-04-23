@@ -30,10 +30,10 @@ export function WaterfallPlot({
             measure: measure as any,
             text,
             textposition: 'outside',
-            connector: { line: { color: '#BDBDBD' } },
-            increasing: { marker: { color: '#2E7D32' } },
-            decreasing: { marker: { color: '#C62828' } },
-            totals: { marker: { color: '#1D1D1B' } },
+            connector: { line: { color: 'rgba(255,255,255,0.2)' } },
+            increasing: { marker: { color: '#7BFF86' } },
+            decreasing: { marker: { color: '#FF6B7A' } },
+            totals: { marker: { color: '#6FB4FF' } },
           } as any,
         ]}
         layout={{

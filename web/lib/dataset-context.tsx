@@ -35,6 +35,16 @@ export function DatasetProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  useEffect(() => {
+    if (!dataset) return;
+    setFiltersState((prev) => ({
+      regions: prev.regions,
+      services: prev.services,
+      start: prev.start ?? dataset.facets.period_min,
+      end: prev.end ?? dataset.facets.period_max,
+    }));
+  }, [dataset]);
+
   const setDataset = useCallback((d: LoadDatasetResponse | null) => {
     setDatasetState(d);
     if (typeof window !== 'undefined') {

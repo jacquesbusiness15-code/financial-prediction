@@ -9,8 +9,8 @@ export function Filters() {
   const { regions, services, period_min, period_max } = dataset.facets;
 
   return (
-    <section className="border-t border-wisag-gray200 pt-4">
-      <h3 className="text-xs font-semibold text-wisag-gray600 uppercase tracking-wider mb-2">
+    <section className="border-t border-white/10 pt-4">
+      <h3 className="text-xs font-semibold text-wisag-gray600 uppercase tracking-[0.24em] mb-2">
         {t('sidebar.filters')}
       </h3>
 
@@ -77,11 +77,11 @@ function MultiFilter({
   return (
     <div className="mt-3">
       <div className="text-xs font-medium text-wisag-gray600 mb-1">{label}</div>
-      <div className="max-h-40 overflow-y-auto space-y-0.5 sidebar-scroll">
+      <div className="max-h-40 overflow-y-auto space-y-0.5 rounded-2xl border border-white/10 bg-white/[0.03] p-2 sidebar-scroll">
         {options.map((opt) => (
           <label
             key={opt}
-            className="flex items-center gap-2 text-xs cursor-pointer px-1.5 py-1 rounded hover:bg-wisag-gray100"
+            className="flex items-center gap-2 text-xs cursor-pointer px-1.5 py-1.5 rounded-xl text-wisag-gray600 hover:bg-white/[0.05] hover:text-white"
           >
             <input
               type="checkbox"

@@ -62,10 +62,14 @@ export default function EarlyWarningsPage() {
   if (!dataset) return <EmptyState />;
 
   return (
-    <div className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-bold text-wisag-navy">{t('warnings.title')}</h1>
-        <p className="text-wisag-gray600">{t('warnings.subtitle')}</p>
+    <div className="app-page">
+      <header className="app-header">
+        <div>
+          <div className="app-kicker">Forward risk signals</div>
+          <h1 className="app-title">{t('warnings.title')}</h1>
+          <p className="app-subtitle">{t('warnings.subtitle')}</p>
+        </div>
+        <div className="eyebrow-chip">Rule-based warnings with AI action plans</div>
       </header>
 
       {query.isLoading && <p className="text-wisag-gray600">Laden…</p>}
@@ -77,7 +81,7 @@ export default function EarlyWarningsPage() {
 
       {query.data && (
         <>
-          <section className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <section className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <KpiTile label={t('kpi.high_severity')}   value={String(query.data.counts.high ?? 0)} />
             <KpiTile label={t('kpi.medium_severity')} value={String(query.data.counts.medium ?? 0)} />
             <KpiTile label={t('kpi.low_severity')}    value={String(query.data.counts.low ?? 0)} />
@@ -87,7 +91,7 @@ export default function EarlyWarningsPage() {
           {query.data.warnings.length === 0 ? (
             <p className="text-wisag-gray600">{t('warnings.none')}</p>
           ) : (
-            <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               <div className="space-y-3">
                 {query.data.warnings.map((w, i) => (
                   <WarningCard
@@ -99,7 +103,7 @@ export default function EarlyWarningsPage() {
                 ))}
               </div>
 
-              <div className="wisag-card">
+              <div className="hero-panel">
                 <div className="flex items-center justify-between mb-3">
                   <h2 className="font-semibold text-wisag-navy">{t('warnings.action_title')}</h2>
                   <button

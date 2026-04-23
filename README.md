@@ -26,6 +26,82 @@ rewrite backed by a FastAPI API over the same analytics modules in `src/`.
 | `backend/`  | FastAPI wrapping `src/` as REST + SSE                         |
 | `web/`      | Next.js 15 (App Router, TS, Tailwind, react-plotly.js)        |
 
+## Local setup on your machine
+
+### Prerequisites
+
+- `Python 3.12+`
+- `Node.js 20+`
+- `pnpm` (Corepack works fine: `corepack enable`)
+
+### 1. Backend environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r backend/requirements.txt
+cp .env.example .env
+```
+
+Optional:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+### 2. Frontend environment
+
+```bash
+cd web
+pnpm install
+cd ..
+```
+
+### 3. Run in local development mode
+
+Terminal 1:
+
+```bash
+source .venv/bin/activate
+uvicorn backend.main:app --reload
+```
+
+Terminal 2:
+
+```bash
+cd web
+pnpm dev
+```
+
+Open:
+
+- Frontend: `http://localhost:3000`
+- Backend docs: `http://localhost:8000/docs`
+
+### 4. Run in single-port production-like mode
+
+```bash
+cd web && pnpm build && cd ..
+source .venv/bin/activate
+uvicorn backend.main:app --host 0.0.0.0 --port 8000
+```
+
+Open `http://localhost:8000`.
+
+### 5. Load the provided sample dataset
+
+The app accepts both Excel and CSV files. The supplied CSV in Downloads works:
+
+```text
+/Users/uzair99/Downloads/Dataset_anoym(Datensatz für Test (anonym)).csv
+```
+
+Paste that full path into the app's data-source field, or move the file into
+`data/` and load it from there.
+
+CSV loading now handles non-UTF-8 encodings like `ISO-8859-1`, which was
+required for the provided challenge dataset.
+
 ### Streamlit (original)
 
 ```bash

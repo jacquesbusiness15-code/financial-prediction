@@ -24,7 +24,7 @@ export function TimelinePlot({
             mode: 'lines+markers',
             name: 'Ist-DB (€)',
             x, y: actual,
-            line: { color: '#E94E1B', width: 3 },
+            line: { color: '#7BFF86', width: 3 },
             marker: { size: 7 },
           },
           ...(hasPlan ? [{
@@ -32,7 +32,7 @@ export function TimelinePlot({
             mode: 'lines' as const,
             name: 'Plan-DB (€)',
             x, y: planned,
-            line: { color: '#1D1D1B', width: 2, dash: 'dash' as const },
+            line: { color: '#6FB4FF', width: 2, dash: 'dash' as const },
           }] : []),
         ]}
         layout={{
