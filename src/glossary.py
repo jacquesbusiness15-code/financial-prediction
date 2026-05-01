@@ -47,5 +47,4 @@ de_glossary: dict[str, str] = {
 
 
 def g(key: str) -> str:
-    """Look up a tooltip. Returns an empty string for unknown keys."""
     return de_glossary.get(key, "")

@@ -29,9 +29,9 @@ cost centers for margin risk. Every decision below is optimized for:
 
 | | Hex | Token | Use |
 |---|---|---|---|
-| WISAG Orange | `#E94E1B` | `accent` | primary CTA, active nav, borders on focus, positive affordance |
-| WISAG Orange (dark) | `#C63D0F` | `accent_dark` | hover state for primary buttons |
-| WISAG Orange (light) | `#FDE6DC` | `accent_light` | active-nav background, hover tint |
+| WISAG Green | `#6DB233` | `accent` | primary CTA, active nav, borders on focus, positive affordance |
+| WISAG Green (dark) | `#528A28` | `accent_dark` | hover state for primary buttons |
+| WISAG Green (light) | `#E6F2D6` | `accent_light` | active-nav background, hover tint |
 | WISAG Navy | `#1D1D1B` | `fg_primary` | body copy, headings, primary icons |
 | Off-white | `#FAFAF7` | `bg_app` | page background |
 
@@ -223,8 +223,8 @@ Three canonical shadows. The UI is mostly flat — shadows are a last resort.
 |---|---|---|
 | `shadow` | `0 1px 2px rgba(22,22,20,0.04)` | resting state of every card/surface |
 | `shadow_lg` | `0 4px 14px rgba(22,22,20,0.06)` | nav-tile hover lift |
-| `shadow_hero` | `0 4px 16px rgba(233,78,27,0.18)` | landing gradient hero only |
-| `shadow_focus` | `0 0 0 3px rgba(233,78,27,0.25)` | focus ring (see §9) |
+| `shadow_hero` | `0 4px 16px rgba(109,178,51,0.22)` | landing gradient hero only |
+| `shadow_focus` | `0 0 0 3px rgba(109,178,51,0.28)` | focus ring (see §9) |
 
 Buttons, pills, and nav items do **not** carry shadows.
 
@@ -245,7 +245,7 @@ Never animate on page load. Transitions live on `:hover` and `:focus` only.
 
 ## 9. Focus & accessibility
 
-- **Focus ring**: `shadow_focus` (a 3px orange glow at 25% alpha). Applied
+- **Focus ring**: `shadow_focus` (a 3px green glow at 28% alpha). Applied
   to every interactive element that receives keyboard focus.
 - **Focus border**: `focus_border` = `accent`. Applied to `select`,
   `input`, `textarea`.
@@ -384,9 +384,9 @@ both. When changing the emitters, remove the alias in the same change.
 ### Colors (most-used)
 
 ```
-accent          #E94E1B   bg_app            #FAFAF7   pos_dark    #1B5E20
-accent_dark     #C63D0F   bg_surface        #FFFFFF   neg_dark    #B71C1C
-accent_light    #FDE6DC   bg_muted          #F5F5F2   warn_dark   #8A4A00
+accent          #6DB233   bg_app            #FAFAF7   pos_dark    #1B5E20
+accent_dark     #528A28   bg_surface        #FFFFFF   neg_dark    #B71C1C
+accent_light    #E6F2D6   bg_muted          #F5F5F2   warn_dark   #8A4A00
 fg_primary      #1D1D1B   border            #E8E6E1   accent_ai   #EEE9F7
 fg_secondary    #6B6B6B   border_strong    #D8D5CE
 ```
@@ -428,8 +428,8 @@ text_sm   0.88    text_lg    1.15    text_3xl  1.90
 ```
 shadow        0 1px 2px rgba(22,22,20,0.04)       resting cards
 shadow_lg     0 4px 14px rgba(22,22,20,0.06)      nav-tile hover
-shadow_hero   0 4px 16px rgba(233,78,27,0.18)     gradient hero
-shadow_focus  0 0 0 3px rgba(233,78,27,0.25)      focus ring
+shadow_hero   0 4px 16px rgba(109,178,51,0.22)    gradient hero
+shadow_focus  0 0 0 3px rgba(109,178,51,0.28)     focus ring
 ```
 
 ---

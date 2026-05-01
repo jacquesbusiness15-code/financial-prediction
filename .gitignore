@@ -7,6 +7,8 @@ data/*.xlsx
 data/*.xls
 data/*.csv
 data/.cache/
+data/action_log.sqlite
+data/action_log.sqlite-*
 !data/.gitkeep
 .streamlit/secrets.toml
 .DS_Store
@@ -26,6 +28,7 @@ web/_tmp_*
 .streamlit_upload*.xlsx
 .streamlit_upload*.csv
 .streamlit_upload*.xls
+.streamlit-run.log
 
 # Ruflo runtime (keep .claude/, .mcp.json, CLAUDE.md committed)
 .claude-flow/

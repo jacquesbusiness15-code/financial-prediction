@@ -1,22 +1,20 @@
-"""Single-contract detail view, opened by clicking a row in the portfolio table.
-
-Lifted verbatim from the old `app.py._render_overview`, with two changes:
-
-- Accepts an explicit `cost_center_id` instead of picking the worst CM.
-- Renders a "Back to overview" link that clears the session-state selection
-  and returns to the portfolio view.
-"""
+"""Single-contract detail view, opened by clicking a row in the portfolio table."""
 from __future__ import annotations
 
-from datetime import datetime
 from html import escape
 
 import pandas as pd
 import streamlit as st
 
-from src import drivers, facility_overview as fov, sim
+from src import drivers, facility_overview as fov
 from src.components import driver_row, hero_card, icon_tile, section_card
+from src.contract_metrics import compute_contract_overview_metrics, compute_metrics
+from src.early_warning import detect as detect_warnings
 from src.i18n import t
+from src.kpi_gaps import detect_gaps
+from src.portfolio_page import _fmt_eur_signed
+from src.portfolio_ranking import compute_rankings
+from src.solutions_panel import render as render_solutions_panel
 from src.viz_svg import area_chart
 
 
@@ -46,10 +44,25 @@ _CATEGORY_KEYS: list[tuple[str, str]] = [
 ]
 
 
+def _render_category_pills(state_key: str, btn_key_prefix: str, current: str) -> None:
+    st.markdown("<div class='wisag-cat-bar'>", unsafe_allow_html=True)
+    cols = st.columns(3, gap="small")
+    for col, (key, label_key) in zip(cols, _CATEGORY_KEYS):
+        with col:
+            if st.button(
+                t(label_key),
+                key=f"{btn_key_prefix}_{key}",
+                type=("primary" if key == current else "secondary"),
+                use_container_width=True,
+            ):
+                st.session_state[state_key] = key
+                st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def _render_overview_block(focus: pd.DataFrame,
                            selected_period: pd.Timestamp,
                            cost_center_id: str) -> None:
-    """Big "Overview" title + category pill bar + 12-month regression chart."""
     st.markdown(
         f"<h1 class='wisag-overview-title'>{escape(t('overview.section_title'))}</h1>",
         unsafe_allow_html=True,
@@ -60,20 +73,7 @@ def _render_overview_block(focus: pd.DataFrame,
     if current not in {k for k, _ in _CATEGORY_KEYS}:
         current = "revenue"
 
-    st.markdown("<div class='wisag-cat-bar'>", unsafe_allow_html=True)
-    cols = st.columns(3, gap="small")
-    for col, (key, label_key) in zip(cols, _CATEGORY_KEYS):
-        with col:
-            btn_type = "primary" if key == current else "secondary"
-            if st.button(
-                t(label_key),
-                key=f"cat_{cost_center_id}_{key}",
-                type=btn_type,
-                use_container_width=True,
-            ):
-                st.session_state[state_key] = key
-                st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
+    _render_category_pills(state_key, f"cat_{cost_center_id}", current)
 
     hist = focus[focus["period"] <= selected_period]
     values, periods = fov.category_series(hist, current, n=12)
@@ -82,16 +82,14 @@ def _render_overview_block(focus: pd.DataFrame,
         return
 
     trend = fov.linear_trend(values)
-    declining = trend[-1] < trend[0]
+    # Red = bad, green = good. Rising costs are bad; rising revenue/CM are good.
+    rising = values[-1] > values[0]
+    bad_trend = rising if current == "costs" else not rising
     svg = area_chart(
-        values,
-        periods,
-        declining=declining,
-        y_as_pct=False,
-        value_fmt="eur",
-        trendline=trend,
+        values, periods,
+        declining=bad_trend,
+        y_as_pct=False, value_fmt="eur", trendline=trend,
     )
-
     st.markdown(
         "<div class='wisag-chart-wrap'>"
         f"<p class='wisag-section-sub'>{escape(t('overview.trend_sub'))}</p>"
@@ -99,6 +97,55 @@ def _render_overview_block(focus: pd.DataFrame,
         "</div>",
         unsafe_allow_html=True,
     )
+
+
+def _last_str(focus: pd.DataFrame, col: str, fallback: str = "") -> str:
+    if col not in focus.columns:
+        return fallback
+    v = focus[col].iloc[-1]
+    return str(v) if pd.notna(v) else fallback
+
+
+def _has_margin_value(row: pd.Series) -> bool:
+    cm_pct = row.get("cm_db_pct")
+    if cm_pct is not None and not pd.isna(cm_pct):
+        return True
+    revenue = row.get("revenue_total")
+    return revenue is not None and not pd.isna(revenue) and float(revenue) >= 10.0
+
+
+def _default_period_index(focus: pd.DataFrame) -> int:
+    if focus.empty:
+        return 0
+    for idx in range(len(focus) - 1, -1, -1):
+        if _has_margin_value(focus.iloc[idx]):
+            period = pd.Timestamp(focus.iloc[idx]["period"])
+            periods = list(focus["period"])
+            for i in range(len(periods) - 1, -1, -1):
+                if pd.Timestamp(periods[i]) == period:
+                    return i
+    return len(focus) - 1
+
+
+def _arrow(value: float | None) -> str:
+    if value is None or value == 0:
+        return ""
+    return " ↑" if value > 0 else " ↓"
+
+
+def _variant(value: float | None, *, bad_up: bool) -> str | None:
+    if value is None or value == 0:
+        return None
+    if bad_up:
+        return "neg" if value > 0 else "pos"
+    return "pos" if value > 0 else "neg"
+
+
+_STATUS_LABEL_KEYS = {
+    "critical": "overview.status.critical",
+    "warn":     "overview.status.warn",
+    "healthy":  "overview.status.healthy",
+}
 
 
 def render(df: pd.DataFrame, cost_center_id: str) -> None:
@@ -118,9 +165,8 @@ def render(df: pd.DataFrame, cost_center_id: str) -> None:
 
     period_state_key = f"contract_detail_period_{cost_center_id}"
     if period_state_key not in st.session_state:
-        st.session_state[period_state_key] = len(period_labels) - 1
-    pick = int(st.session_state[period_state_key])
-    pick = max(0, min(pick, len(period_labels) - 1))
+        st.session_state[period_state_key] = _default_period_index(focus)
+    pick = max(0, min(int(st.session_state[period_state_key]), len(period_labels) - 1))
     selected_period = pd.Timestamp(periods[pick])
 
     tb_l, tb_r = st.columns([5, 1])
@@ -145,90 +191,64 @@ def render(df: pd.DataFrame, cost_center_id: str) -> None:
 
     _render_overview_block(focus, selected_period, cost_center_id)
 
-    focus_name = (str(focus["cost_center_name"].iloc[-1])
-                  if "cost_center_name" in focus.columns
-                  and pd.notna(focus["cost_center_name"].iloc[-1])
-                  else str(cost_center_id))
-    focus_region = (str(focus["region"].iloc[-1])
-                    if "region" in focus.columns
-                    and pd.notna(focus["region"].iloc[-1]) else "")
-    focus_service = (str(focus["service_type"].iloc[-1])
-                     if "service_type" in focus.columns
-                     and pd.notna(focus["service_type"].iloc[-1]) else "")
+    focus_name = _last_str(focus, "cost_center_name", str(cost_center_id))
+    focus_region = _last_str(focus, "region")
+    focus_service = _last_str(focus, "service_type")
 
     focus_month = focus[focus["period"] == selected_period]
     if focus_month.empty:
         focus_month = focus.tail(1)
     current_row = focus_month.iloc[-1]
 
-    rev_cur = float(current_row.get("revenue_total") or 0)
-    cm_cur = float(current_row.get("cm_db") or 0)
-    margin_cur = (cm_cur / rev_cur) if rev_cur else 0.0
-    cost_cur = rev_cur - cm_cur
-
     prior_rows = focus[focus["period"] < current_row["period"]]
     prior_row = prior_rows.iloc[-1] if not prior_rows.empty else None
-    if prior_row is not None and (prior_row.get("revenue_total") or 0) > 0:
-        rev_prev = float(prior_row["revenue_total"])
-        cm_prev = float(prior_row["cm_db"] or 0)
-        margin_prev = cm_prev / rev_prev
-        margin_mom = margin_cur - margin_prev
-        cost_prev = rev_prev - cm_prev
-        cost_mom_pct = ((cost_cur - cost_prev) / cost_prev) if cost_prev > 0 else None
-    else:
-        margin_mom = None
-        cost_mom_pct = None
+    overview = compute_contract_overview_metrics(current_row, prior_row)
+    margin_cur = overview.margin_pct
+    margin_mom = overview.margin_mom_delta
+    cost_mom_eur = overview.cost_mom_eur
+    margin_mom_eur = overview.margin_mom_eur
 
     status_level = fov.status_for(margin_cur, margin_mom)
-    # A 5 %+ cost jump is notable even when margin still looks fine — promote
-    # healthy → warn so the status pill matches the cost story.
-    if (status_level == "healthy" and cost_mom_pct is not None
-            and cost_mom_pct >= 0.05):
+    # Promote healthy -> warn when costs rose materially even if margin looks fine.
+    if (status_level == "healthy" and cost_mom_eur is not None
+            and cost_mom_eur > 0):
         status_level = "warn"
-    status_label_keys = {
-        "critical": "overview.status.critical",
-        "warn":     "overview.status.warn",
-        "healthy":  "overview.status.healthy",
-    }
-    mom_neg = (margin_mom is not None) and (margin_mom < 0)
-    cost_up = (cost_mom_pct is not None) and (cost_mom_pct > 0)
-    cost_mom_label = (
-        f"{cost_mom_pct:+.1%}" + (" ↑" if cost_up else (" ↓" if cost_mom_pct and cost_mom_pct < 0 else ""))
-        if cost_mom_pct is not None else "—"
-    )
 
-    history_tail = focus[focus["period"] <= current_row["period"]].tail(6)
-    spark_values = fov.sparkline_values(history_tail, n=6)
-    spark_periods = list(history_tail["period"].tolist())
+    # Cost MoM is always shown as the absolute EUR delta.
+    if cost_mom_eur is not None and cost_mom_eur != 0:
+        cost_mom_label = _fmt_eur_signed(cost_mom_eur) + _arrow(cost_mom_eur)
+        cost_mom_variant = _variant(cost_mom_eur, bad_up=True)
+    else:
+        cost_mom_label = "—"
+        cost_mom_variant = None
 
-    spark_svg = (
-        area_chart(spark_values, spark_periods, declining=mom_neg)
-        if spark_values and len(spark_values) >= 2
-        else None
-    )
+    # Margin change vs previous month is shown as an EUR delta so it
+    # mirrors the "Kosten vs. Vormonat" (EUR) card next to "Gesamtkosten".
+    # The margin-ratio pp delta in `margin_mom` is still used for status/variant.
+    if margin_mom_eur is not None and margin_mom_eur != 0:
+        margin_mom_label = _fmt_eur_signed(margin_mom_eur) + _arrow(margin_mom_eur)
+        margin_mom_variant = _variant(margin_mom_eur, bad_up=False)
+    else:
+        margin_mom_label = "—"
+        margin_mom_variant = None
 
     hero_card(
         icon_html=icon_tile(fov.emoji_for(focus_service, focus_name), "purple"),
         title=focus_name,
         subtitle=focus_region,
         status_level=status_level,
-        status_label=t(status_label_keys[status_level]),
+        status_label=t(_STATUS_LABEL_KEYS[status_level]),
         metrics=[
-            {"label": t("overview.cost_total"), "value": _eur(cost_cur)},
-            {"label": t("overview.cost_mom"),
-             "value": cost_mom_label,
-             "variant": "neg" if cost_up else ("pos" if cost_mom_pct and cost_mom_pct < 0 else None)},
-            {"label": t("overview.margin"), "value": _pct(margin_cur)},
-            {"label": t("overview.change_mom"),
-             "value": (_pct(margin_mom, signed=True) if margin_mom is not None else "—")
-                      + (" ↓" if mom_neg else (" ↑" if margin_mom and margin_mom > 0 else "")),
-             "variant": "neg" if mom_neg else ("pos" if margin_mom and margin_mom > 0 else None)},
+            {"label": t("overview.cost_total"), "value": _eur(overview.total_cost_eur),
+             "help_key": "labor_ratio"},
+            {"label": t("overview.cost_mom"), "value": cost_mom_label,
+             "variant": cost_mom_variant, "help_key": "labor_ratio"},
+            {"label": t("overview.margin"), "value": _eur(overview.margin_eur),
+             "help_key": "cm_db"},
+            {"label": t("overview.change_mom"), "value": margin_mom_label,
+             "variant": margin_mom_variant, "help_key": "cm_pct"},
         ],
-        chart_svg=spark_svg,
     )
-
-    DRIVER_ICON = fov.DRIVER_ICON
-    ACTIONS = fov.ACTIONS
 
     cost_drivers: list[drivers.Driver] = (
         fov.worst_cost_drivers(current_row, prior_row, limit=3)
@@ -238,7 +258,7 @@ def render(df: pd.DataFrame, cost_center_id: str) -> None:
     action_keys: list[str] = []
     for d in cost_drivers:
         cls = fov.classify_driver(d)
-        mapped = DRIVER_ICON[cls][2] if cls in DRIVER_ICON else None
+        mapped = fov.DRIVER_ICON[cls][2] if cls in fov.DRIVER_ICON else None
         if mapped and mapped not in action_keys:
             action_keys.append(mapped)
     for fallback in ("shift", "absence", "onboarding"):
@@ -249,150 +269,112 @@ def render(df: pd.DataFrame, cost_center_id: str) -> None:
     action_keys = action_keys[:3]
 
     col_why, col_do = st.columns(2)
-
     with col_why:
-        rows_html = ""
-        if not cost_drivers or prior_row is None:
-            rows_html = (
-                f"<p class='wisag-driver-sub wisag-empty-row'>"
-                f"{escape(t('overview.no_baseline'))}</p>"
-            )
-        else:
-            for d in cost_drivers:
-                cls = fov.classify_driver(d)
-                emoji, title_key, _action = DRIVER_ICON[cls]
-                pct = fov.driver_pct_change(d)
-                pct_label = (
-                    f"+{abs(pct):.1%}" if pct is not None
-                    else _eur(d.current - d.baseline)
-                )
-                cause_key = f"{title_key}.cause"
-                cause_txt = t(cause_key)
-                # Fall back to the short sub line if no `.cause` string is defined.
-                if cause_txt == cause_key:
-                    cause_txt = t(f"{title_key}.sub")
-                rows_html += driver_row(
-                    icon=emoji,
-                    title=t(title_key),
-                    subtitle=cause_txt,
-                    pct_label=pct_label,
-                    variant="neg",
-                )
-        section_card(
-            title=t("overview.cost_causes_title"),
-            subtitle=t("overview.cost_causes_sub"),
-            rows_html=rows_html,
-        )
-
+        _render_causes_card(cost_drivers, prior_row is not None)
     with col_do:
+        _render_actions_card(action_keys)
+
+    _render_kpi_gaps_card(current_row, prior_row)
+
+    _render_solution_finder_card(df, cost_center_id)
+
+
+def _render_solution_finder_card(df: pd.DataFrame, cost_center_id: str) -> None:
+    rankings = compute_rankings(df)
+    target = next((r for r in rankings
+                   if str(r.cost_center_id) == str(cost_center_id)), None)
+    if target is None:
+        return
+    all_metrics = compute_metrics([target], df)
+    if not all_metrics:
+        return
+    warnings = detect_warnings(df)
+    render_solutions_panel(df, cost_center_id, all_metrics[0], warnings)
+
+
+def _render_causes_card(cost_drivers, have_prior: bool) -> None:
+    from src.glossary import g as _g
+
+    if not cost_drivers or not have_prior:
+        rows_html = (f"<p class='wisag-driver-sub wisag-empty-row'>"
+                     f"{escape(t('overview.no_baseline'))}</p>")
+    else:
         rows_html = ""
-        for key in action_keys:
-            a = ACTIONS[key]
-            why_key = a.get("why_key")
-            why_txt = t(why_key) if why_key else None
-            if why_txt == why_key:  # missing translation → render without rationale
-                why_txt = None
+        for d in cost_drivers:
+            cls = fov.classify_driver(d)
+            emoji, title_key, _action_key = fov.DRIVER_ICON[cls]
+            pct = fov.driver_pct_change(d)
+            # `safe_pct_change` returns None when the baseline is too small
+            # or sign-flips — in those cases, show the EUR delta.
+            pct_label = (f"+{abs(pct):.1%}" if pct is not None
+                         else _eur(d.current - d.baseline))
+            cause_key = f"{title_key}.cause"
+            cause_txt = t(cause_key)
+            if cause_txt == cause_key:
+                cause_txt = t(f"{title_key}.sub")
             rows_html += driver_row(
-                icon=a["icon"],
-                title=t(a["title_key"]),
-                subtitle=t(a["sub_key"]),
-                pct_label=f"+{a['impact']:.1%}",
-                variant="pos",
-                rationale=why_txt,
+                icon=emoji, title=t(title_key), subtitle=cause_txt,
+                pct_label=pct_label, variant="neg",
             )
-        section_card(
-            title=t("overview.solutions_title"),
-            subtitle=t("overview.solutions_sub"),
-            rows_html=rows_html,
-            hint=t("overview.potential_impact"),
+    section_card(
+        title=t("overview.cost_causes_title"),
+        subtitle=t("overview.cost_causes_sub"),
+        rows_html=rows_html,
+        title_help=_g("waterfall"),
+    )
+
+
+def _render_actions_card(action_keys: list[str]) -> None:
+    from src.glossary import g as _g
+
+    rows_html = ""
+    for key in action_keys:
+        a = fov.ACTIONS[key]
+        why_key = a.get("why_key")
+        why_txt = t(why_key) if why_key else None
+        if why_txt == why_key:
+            why_txt = None
+        rows_html += driver_row(
+            icon=a["icon"], title=t(a["title_key"]), subtitle=t(a["sub_key"]),
+            pct_label=f"+{a['impact']:.1%}", variant="pos", rationale=why_txt,
         )
+    section_card(
+        title=t("overview.solutions_title"),
+        subtitle=t("overview.solutions_sub"),
+        rows_html=rows_html,
+        hint=t("overview.potential_impact"),
+        title_help=_g("impact_eur"),
+    )
 
-    st.markdown("<div class='wisag-stack-gap wisag-stack-gap--md'></div>",
-                unsafe_allow_html=True)
 
-    with st.container():
-        st.markdown(
-            "<span class='wisag-whatif-anchor'></span>"
-            f"<h3 class='wisag-section-title wisag-whatif-title'>"
-            f"{escape(t('overview.whatif'))}</h3>"
-            f"<p class='wisag-section-sub wisag-whatif-sub'>"
-            f"{escape(t('overview.whatif_sub'))}</p>",
-            unsafe_allow_html=True,
-        )
+def _render_kpi_gaps_card(current_row: pd.Series, prior_row: pd.Series | None) -> None:
+    """Reflect on which KPIs would sharpen the diagnosis for this period."""
+    if prior_row is None:
+        gaps = detect_gaps(current_row, [], 0.0, 0.0, limit=4)
+    else:
+        driver_list = drivers.decompose(current_row, prior_row)
+        observed = drivers.observed_delta(current_row, prior_row)
+        residual = drivers.residual(driver_list, observed)
+        gaps = detect_gaps(current_row, driver_list, observed, residual, limit=4)
 
-        baseline_hc = sim.estimate_headcount(current_row)
-        baseline_hc_int = int(round(baseline_hc)) if baseline_hc else 100
-
-        wif_l, wif_m, wif_r = st.columns([3, 2, 2], vertical_alignment="center")
-
-        with wif_l:
-            sub_l, sub_m, sub_r = st.columns([2, 1, 2])
-            with sub_l:
-                bl_in = st.number_input(
-                    t("overview.team_size"),
-                    value=baseline_hc_int, min_value=1, step=1,
-                    key=f"wif_bl_{cost_center_id}",
-                )
-            with sub_m:
-                st.markdown(
-                    "<div class='wisag-wif-arrow'>→</div>",
-                    unsafe_allow_html=True,
-                )
-            with sub_r:
-                new_in = st.number_input(
-                    t("overview.employees"),
-                    value=baseline_hc_int, min_value=0, step=1,
-                    key=f"wif_new_{cost_center_id}",
-                )
-
-            sim_result = sim.simulate_team_size(
-                current_row, new_headcount=new_in, baseline_headcount=bl_in,
+    if not gaps:
+        rows_html = (f"<p class='wisag-driver-sub wisag-empty-row'>"
+                     f"{escape(t('gaps.empty'))}</p>")
+    else:
+        rows_html = ""
+        for gap in gaps:
+            rows_html += driver_row(
+                icon="?",
+                title=t(gap.title_key),
+                subtitle=t(gap.reason_key),
+                pct_label="",
+                variant="neg",
+                tile_variant="purple",
+                show_chevron=False,
             )
-            st.markdown(
-                "<div class='wisag-status-line'>"
-                "<span class='wisag-pill wisag-pill-pos'>"
-                f"{escape(t('overview.productivity_gain', p=_pct(sim_result.productivity_gain_pct, signed=True)))}"
-                "</span></div>",
-                unsafe_allow_html=True,
-            )
-
-        with wif_m:
-            delta_cls = ("wisag-whatif-delta--pos" if sim_result.delta_margin >= 0
-                         else "wisag-whatif-delta--neg")
-            st.markdown(
-                f"""
-<div>
-  <div class='wisag-whatif-label'>{escape(t('overview.new_margin'))}</div>
-  <div class='wisag-whatif-value'>{_pct(sim_result.new_margin)}</div>
-  <div class='{delta_cls}'>
-    {escape(t('overview.vs_current', p=_pct(sim_result.delta_margin, signed=True)))}
-  </div>
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-
-        with wif_r:
-            st.markdown(
-                f"""
-<div class='wisag-explore-wrap'>
-  <div class='wisag-explore-card'>
-    <div class='wisag-explore-card-body'>
-      <p class='wisag-explore-title'>{escape(t('overview.explore_more'))}</p>
-      <p class='wisag-explore-sub'>{escape(t('overview.explore_more_sub'))}</p>
-    </div>
-    <span class='wisag-driver-chev'>›</span>
-  </div>
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-
-    st.markdown(
-        f"""
-<div class='wisag-footer-ts'>
-  {escape(t('overview.data_updated', ts=datetime.now().strftime('%b %d, %Y · %H:%M')))}
-</div>
-""",
-        unsafe_allow_html=True,
+    section_card(
+        title=t("gaps.section_title"),
+        subtitle=t("gaps.section_sub"),
+        rows_html=rows_html,
+        hint=t("gaps.section_hint"),
     )

@@ -1,12 +1,9 @@
 """Per-contract multi-dimensional metrics + 0-100 scoring.
 
 Wraps the identity-centric `ContractRanking` from `src.portfolio_ranking` and
-adds four category-specific metric bundles (profitability, cost structure,
-efficiency, stability) plus a composite overall score. Scores are percentile-
-ranked across the *visible* set so the "best" contract in the filtered view
-gets 100 and the "worst" gets 0.
-
-No Streamlit imports here — safe to unit-test.
+adds four category-specific bundles (profitability, cost structure, efficiency,
+stability) plus a composite overall score. Scores are percentile-ranked across
+the *visible* set so the best filtered contract gets 100 and the worst gets 0.
 """
 from __future__ import annotations
 
@@ -15,13 +12,12 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
+import streamlit as st
 
 from src.portfolio_ranking import ContractRanking, compute_rankings
 
 
-# Cost-category columns used for "highest cost" / "highest MoM increase".
-# Mirrors src/config.py COST_COLS_DB + COST_COLS_DB1_EXTRA + COST_COLS_DB2_EXTRA
-# but grouped for display (we show one label per group, not per sub-column).
+# Cost categories for "highest cost" / "highest MoM increase" widgets.
 COST_CATEGORY_COLUMNS: dict[str, list[str]] = {
     "labor": ["labor_cost_total"],
     "subcontractor": [
@@ -39,6 +35,66 @@ LONG_TERM_MONTH_THRESHOLD = 12
 SMALL_SET_SCORE_DEFAULT = 50.0
 MIN_SET_FOR_PERCENTILE = 3
 
+_EMPTY_PROFITABILITY = {
+    "unrent_now_eur": 0.0,
+    "unrent_mom_delta_eur": None,
+    "unrent_6m_delta_eur": None,
+    "profitability_trend_dir": "flat",
+    "cm_mom_pct": None,
+}
+_EMPTY_COST_STRUCTURE = {
+    "top_cost_category_now": None,
+    "top_cost_category_now_eur": 0.0,
+    "top_cost_increase_cat": None,
+    "top_cost_increase_pct": None,
+    "total_cost_increase_pct": None,
+}
+_EMPTY_EFFICIENCY = {
+    "hours_planned_minus_productive": None,
+    "ratio_mom_delta_pp": None,
+    "ratio_6m_delta_pp": None,
+    "hour_variance": None,
+    "eff_badness": None,
+}
+_EMPTY_STABILITY = {
+    "contract_duration_months": None,
+    "cm_variance": None,
+    "is_long_term": False,
+    "revenue_variance": None,
+}
+_EMPTY_REVENUE_TREND = {
+    "revenue_mom_delta_eur": None,
+    "revenue_6m_delta_eur": None,
+    "top_revenue_decline_cat": None,
+    "top_revenue_decline_eur": None,
+    "revenue_trend_dir": "no_data",
+}
+
+# Revenue stream keys shared with i18n ("revenue_stream.<key>"). Order drives
+# tie-breaking when two streams drop by exactly the same amount.
+REVENUE_STREAM_COLUMNS: list[tuple[str, str]] = [
+    ("fixed",  "revenue_fixed"),
+    ("hourly", "revenue_hourly"),
+    ("other",  "revenue_other"),
+]
+
+# Epsilon for the "flat" trend band: revenue that moved less than this in both
+# relative and absolute terms is treated as unchanged. Prevents a 5 EUR drop on
+# a 500k EUR contract from rendering as "Rückläufig".
+_REVENUE_TREND_REL_EPS = 0.005   # 0.5 % of the larger-of-current-or-prior
+_REVENUE_TREND_ABS_EPS = 50.0    # never call a sub-50 EUR move a real trend
+
+
+@dataclass
+class ContractOverviewMetrics:
+    total_cost_eur: float | None
+    cost_mom_pct: float | None
+    cost_mom_eur: float | None
+    margin_eur: float | None
+    margin_mom_eur: float | None
+    margin_pct: float | None
+    margin_mom_delta: float | None
+
 
 @dataclass
 class ContractMetrics:
@@ -48,9 +104,8 @@ class ContractMetrics:
     unrent_now_eur: float
     unrent_mom_delta_eur: float | None
     unrent_6m_delta_eur: float | None
-    top_cost_increase_cat_mom: str | None
-    profitability_trend_dir: str  # "up" | "down" | "flat"
-    cm_mom_pct: float | None  # MoM change of actual cm_db as a ratio, e.g. -0.12
+    profitability_trend_dir: str
+    cm_mom_pct: float | None
 
     # Cost structure
     top_cost_category_now: str | None
@@ -71,6 +126,13 @@ class ContractMetrics:
     is_long_term: bool
     revenue_variance: float | None
 
+    # Revenue trend
+    revenue_mom_delta_eur: float | None
+    revenue_6m_delta_eur: float | None
+    top_revenue_decline_cat: str | None
+    top_revenue_decline_eur: float | None
+    revenue_trend_dir: str
+
     # Scores (0-100, higher = better)
     profitability_score: float
     cost_structure_score: float
@@ -88,12 +150,156 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _maybe_float(value) -> float | None:
+    """Like `_safe_float` but returns `None` instead of defaulting on missing."""
+    try:
+        if value is None or pd.isna(value):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+# `cm_db_pct` is expected in percent (e.g. 17.0 for 17 %). Some upstream feeds
+# accidentally store it as a ratio (0.17). Anything whose magnitude is at or
+# below this bound is treated as already-ratio and forces the fallback path.
+_CM_DB_PCT_RATIO_UPPER_BOUND = 1.5
+
+
+def _row_margin_pct(
+    row: pd.Series | None,
+    *,
+    min_revenue_eur: float = 10.0,
+) -> float | None:
+    if row is None:
+        return None
+
+    cm_pct_raw = row.get("cm_db_pct")
+    try:
+        if cm_pct_raw is not None and not pd.isna(cm_pct_raw):
+            cm_pct_val = float(cm_pct_raw)
+            if abs(cm_pct_val) > _CM_DB_PCT_RATIO_UPPER_BOUND:
+                return cm_pct_val / 100.0
+    except (TypeError, ValueError):
+        pass
+
+    revenue = _maybe_float(row.get("revenue_total"))
+    cm = _maybe_float(row.get("cm_db"))
+    if revenue is None or cm is None:
+        return None
+    if revenue >= min_revenue_eur:
+        return cm / revenue
+    return None
+
+
+def compute_contract_overview_metrics(
+    current_row: pd.Series,
+    prior_row: pd.Series | None = None,
+    *,
+    min_revenue_eur: float = 10.0,
+) -> ContractOverviewMetrics:
+    """Compute the four hero metrics for the contract detail overview.
+
+    Formulas:
+      * total cost = revenue_total - cm_db
+      * cost vs previous month = total_cost_current - total_cost_previous
+      * margin = cm_db
+      * change vs previous month = cm_db_current - cm_db_previous
+
+    Any metric whose inputs are missing returns ``None`` rather than being
+    silently treated as zero — the UI can then render ``—`` instead of a
+    misleading ``0 €``.
+    """
+    revenue_now = _maybe_float(current_row.get("revenue_total"))
+    cm_now = _maybe_float(current_row.get("cm_db"))
+    total_cost_now = (revenue_now - cm_now) if (revenue_now is not None
+                                                and cm_now is not None) else None
+    margin_now_eur = cm_now
+    margin_now = _row_margin_pct(current_row, min_revenue_eur=min_revenue_eur)
+
+    cost_mom_pct: float | None = None
+    cost_mom_eur: float | None = None
+    margin_mom_eur: float | None = None
+    margin_mom_delta: float | None = None
+
+    if prior_row is not None:
+        revenue_prev = _maybe_float(prior_row.get("revenue_total"))
+        cm_prev = _maybe_float(prior_row.get("cm_db"))
+        total_cost_prev = (revenue_prev - cm_prev) if (revenue_prev is not None
+                                                       and cm_prev is not None) else None
+        margin_prev = _row_margin_pct(prior_row, min_revenue_eur=min_revenue_eur)
+
+        if total_cost_now is not None and total_cost_prev is not None:
+            cost_mom_eur = total_cost_now - total_cost_prev
+            cost_mom_pct = safe_pct_change(total_cost_now, total_cost_prev)
+        if margin_now_eur is not None and cm_prev is not None:
+            margin_mom_eur = margin_now_eur - cm_prev
+        if margin_now is not None and margin_prev is not None:
+            margin_mom_delta = margin_now - margin_prev
+
+    return ContractOverviewMetrics(
+        total_cost_eur=total_cost_now,
+        cost_mom_pct=cost_mom_pct,
+        cost_mom_eur=cost_mom_eur,
+        margin_eur=margin_now_eur,
+        margin_mom_eur=margin_mom_eur,
+        margin_pct=margin_now,
+        margin_mom_delta=margin_mom_delta,
+    )
+
+
+def safe_pct_change(
+    current: float | None,
+    baseline: float | None,
+    *,
+    min_ratio: float = 0.05,
+    min_abs_eur: float = 10.0,
+    allow_sign_flip: bool = False,
+) -> float | None:
+    """Standard percentage change, gated against meaningless denominators.
+
+    Returns ``(current - baseline) / abs(baseline)`` when the change is
+    quantitatively meaningful, otherwise ``None``. Callers are expected to
+    fall back to a EUR delta or "no data" when the result is ``None``.
+
+    A baseline is rejected when any of the following hold:
+      * ``baseline`` is missing, NaN, or exactly zero;
+      * ``|baseline| < min_abs_eur`` (absolute floor — e.g. 1 € prev month);
+      * ``|baseline| < min_ratio * max(|baseline|, |current|)`` (relative
+        floor — a fresh series disguised as a change);
+      * ``current`` and ``baseline`` have opposite signs and
+        ``allow_sign_flip`` is ``False`` (treating a sign flip as a %
+        change produces absurd values like -5000 %).
+    """
+    if current is None or baseline is None:
+        return None
+    try:
+        if pd.isna(current) or pd.isna(baseline):
+            return None
+    except TypeError:
+        return None
+    cur = float(current)
+    base = float(baseline)
+    if base == 0.0:
+        return None
+    abs_base = abs(base)
+    if abs_base < min_abs_eur:
+        return None
+    if abs_base < min_ratio * max(abs_base, abs(cur)):
+        return None
+    if not allow_sign_flip and (cur * base) < 0.0:
+        return None
+    return (cur - base) / abs_base
+
+
+def _sorted_history(history: pd.DataFrame) -> pd.DataFrame:
+    if "period" in history.columns:
+        return history.sort_values("period")
+    return history
+
+
 def _cost_category_value(row: pd.Series, cols: list[str]) -> float:
-    total = 0.0
-    for c in cols:
-        if c in row.index:
-            total += _safe_float(row[c])
-    return total
+    return sum(_safe_float(row[c]) for c in cols if c in row.index)
 
 
 def _category_totals(row: pd.Series) -> dict[str, float]:
@@ -108,44 +314,39 @@ def _unrent(row: pd.Series) -> float:
     return max(planned - actual, 0.0)
 
 
+def _productive_ratio(row: pd.Series) -> float | None:
+    planned = _safe_float(row.get("hours_planned"))
+    productive = _safe_float(row.get("hours_productive"))
+    return (productive / planned) if planned > 0 else None
+
+
 def _profitability_metrics(history: pd.DataFrame) -> dict:
-    hist = history.sort_values("period") if "period" in history.columns else history
+    hist = _sorted_history(history)
     if hist.empty:
-        return {
-            "unrent_now_eur": 0.0,
-            "unrent_mom_delta_eur": None,
-            "unrent_6m_delta_eur": None,
-            "profitability_trend_dir": "flat",
-            "cm_mom_pct": None,
-        }
+        return dict(_EMPTY_PROFITABILITY)
     latest = hist.iloc[-1]
     unrent_now = _unrent(latest)
 
     mom_delta: float | None = None
     cm_mom_pct: float | None = None
+    six_m_delta: float | None = None
+
     if len(hist) >= 2:
         prev = hist.iloc[-2]
         mom_delta = unrent_now - _unrent(prev)
-        cm_now = _safe_float(latest.get("cm_db"))
         cm_prev = _safe_float(prev.get("cm_db"))
-        # Signed % change. Requires a non-zero baseline with the same sign
-        # convention to be interpretable; fall back to None otherwise.
-        if cm_prev != 0:
-            cm_mom_pct = (cm_now - cm_prev) / abs(cm_prev)
+        cm_mom_pct = safe_pct_change(
+            _safe_float(latest.get("cm_db")), cm_prev,
+        )
 
-    six_m_delta: float | None = None
-    if len(hist) >= 2:
         prior = hist.iloc[:-1].tail(6)
-        prior_vals = [_unrent(r) for _, r in prior.iterrows()]
-        if prior_vals:
-            six_m_delta = unrent_now - float(np.mean(prior_vals))
+        if not prior.empty:
+            six_m_delta = unrent_now - float(np.mean([_unrent(r) for _, r in prior.iterrows()]))
 
     if mom_delta is None or mom_delta == 0:
         trend_dir = "flat"
-    elif mom_delta > 0:
-        trend_dir = "up"  # worsening
     else:
-        trend_dir = "down"  # improving
+        trend_dir = "up" if mom_delta > 0 else "down"
 
     return {
         "unrent_now_eur": unrent_now,
@@ -157,46 +358,35 @@ def _profitability_metrics(history: pd.DataFrame) -> dict:
 
 
 def _cost_structure_metrics(history: pd.DataFrame) -> dict:
-    hist = history.sort_values("period") if "period" in history.columns else history
+    hist = _sorted_history(history)
     if hist.empty:
-        return {
-            "top_cost_category_now": None,
-            "top_cost_category_now_eur": 0.0,
-            "top_cost_increase_cat": None,
-            "top_cost_increase_pct": None,
-            "total_cost_increase_pct": None,
-            "top_cost_increase_cat_mom": None,
-        }
-    latest = hist.iloc[-1]
-    now_totals = _category_totals(latest)
+        return dict(_EMPTY_COST_STRUCTURE)
+    now_totals = _category_totals(hist.iloc[-1])
 
-    top_cat_now = None
+    top_cat_now: str | None = None
     top_cat_now_eur = 0.0
     for cat, val in now_totals.items():
         if val > top_cat_now_eur:
-            top_cat_now = cat
-            top_cat_now_eur = val
+            top_cat_now, top_cat_now_eur = cat, val
 
-    prior = hist.iloc[-2] if len(hist) >= 2 else None
     top_inc_cat: str | None = None
     top_inc_pct: float | None = None
     total_pct: float | None = None
 
-    if prior is not None:
-        prev_totals = _category_totals(prior)
-        biggest_delta_eur = 0.0
+    if len(hist) >= 2:
+        prev_totals = _category_totals(hist.iloc[-2])
+        biggest_delta = 0.0
         for cat, now_val in now_totals.items():
-            delta = now_val - prev_totals.get(cat, 0.0)
-            if delta > biggest_delta_eur:
-                biggest_delta_eur = delta
+            prev = prev_totals.get(cat, 0.0)
+            delta = now_val - prev
+            if delta > biggest_delta:
+                biggest_delta = delta
                 top_inc_cat = cat
-                prev = prev_totals.get(cat, 0.0)
-                top_inc_pct = (delta / prev) if prev > 0 else None
+                top_inc_pct = safe_pct_change(now_val, prev)
 
         total_now = sum(now_totals.values())
         total_prev = sum(prev_totals.values())
-        if total_prev > 0:
-            total_pct = (total_now - total_prev) / total_prev
+        total_pct = safe_pct_change(total_now, total_prev)
 
     return {
         "top_cost_category_now": top_cat_now,
@@ -204,71 +394,67 @@ def _cost_structure_metrics(history: pd.DataFrame) -> dict:
         "top_cost_increase_cat": top_inc_cat,
         "top_cost_increase_pct": top_inc_pct,
         "total_cost_increase_pct": total_pct,
-        "top_cost_increase_cat_mom": top_inc_cat,
     }
 
 
 def _efficiency_metrics(history: pd.DataFrame) -> dict:
-    hist = history.sort_values("period") if "period" in history.columns else history
+    hist = _sorted_history(history)
     if hist.empty:
-        return {
-            "hours_planned_minus_productive": None,
-            "ratio_mom_delta_pp": None,
-            "ratio_6m_delta_pp": None,
-            "hour_variance": None,
-        }
+        return dict(_EMPTY_EFFICIENCY)
     latest = hist.iloc[-1]
-    planned = _safe_float(latest.get("hours_planned"))
-    productive = _safe_float(latest.get("hours_productive"))
-    diff = planned - productive
-    hour_var = latest.get("hour_variance")
-    hour_var_f = _safe_float(hour_var, default=float("nan"))
+    planned_latest = _safe_float(latest.get("hours_planned"))
+    diff = planned_latest - _safe_float(latest.get("hours_productive"))
+
+    hour_var_f = _safe_float(latest.get("hour_variance"), default=float("nan"))
     hour_variance = None if np.isnan(hour_var_f) else hour_var_f
 
-    def ratio(row: pd.Series) -> float | None:
-        p = _safe_float(row.get("hours_planned"))
-        prod = _safe_float(row.get("hours_productive"))
-        return (prod / p) if p > 0 else None
-
-    now_ratio = ratio(latest)
-
+    now_ratio = _productive_ratio(latest)
     mom_pp: float | None = None
-    if len(hist) >= 2:
-        prev_ratio = ratio(hist.iloc[-2])
-        if now_ratio is not None and prev_ratio is not None:
+    six_m_pp: float | None = None
+
+    if len(hist) >= 2 and now_ratio is not None:
+        prev_ratio = _productive_ratio(hist.iloc[-2])
+        if prev_ratio is not None:
             mom_pp = (now_ratio - prev_ratio) * 100.0
 
-    six_m_pp: float | None = None
-    if len(hist) >= 2:
         prior = hist.iloc[:-1].tail(6)
-        prior_ratios = [r for r in (ratio(row) for _, row in prior.iterrows())
+        prior_ratios = [r for r in (_productive_ratio(row) for _, row in prior.iterrows())
                         if r is not None]
-        if prior_ratios and now_ratio is not None:
+        if prior_ratios:
             six_m_pp = (now_ratio - float(np.mean(prior_ratios))) * 100.0
+
+    # Self-contained badness signal: fraction of planned hours NOT delivered
+    # productively. Positive = bad. Keeps `_compute_scores` free of temp keys.
+    eff_badness: float | None = None
+    if planned_latest > 0:
+        eff_badness = abs(diff) / planned_latest
 
     return {
         "hours_planned_minus_productive": diff,
         "ratio_mom_delta_pp": mom_pp,
         "ratio_6m_delta_pp": six_m_pp,
         "hour_variance": hour_variance,
+        "eff_badness": eff_badness,
     }
 
 
+def _variance(hist: pd.DataFrame, col: str) -> float | None:
+    if col not in hist.columns:
+        return None
+    series = pd.to_numeric(hist[col], errors="coerce").dropna()
+    if len(series) < 2:
+        return None
+    return float(series.std(ddof=0))
+
+
 def _stability_metrics(history: pd.DataFrame) -> dict:
-    hist = history.sort_values("period") if "period" in history.columns else history
+    hist = _sorted_history(history)
     if hist.empty:
-        return {
-            "contract_duration_months": None,
-            "cm_variance": None,
-            "is_long_term": False,
-            "revenue_variance": None,
-        }
+        return dict(_EMPTY_STABILITY)
     latest = hist.iloc[-1]
 
-    start = latest.get("contract_start")
-    end = latest.get("contract_end")
-    start_ts = pd.to_datetime(start, errors="coerce") if start is not None else pd.NaT
-    end_ts = pd.to_datetime(end, errors="coerce") if end is not None else pd.NaT
+    start_ts = pd.to_datetime(latest.get("contract_start"), errors="coerce")
+    end_ts = pd.to_datetime(latest.get("contract_end"), errors="coerce")
 
     duration_months: int | None = None
     if pd.notna(start_ts):
@@ -277,82 +463,114 @@ def _stability_metrics(history: pd.DataFrame) -> dict:
         if delta_days >= 0:
             duration_months = int(round(delta_days / 30.4375))
 
-    is_long = (duration_months is not None
-               and duration_months >= LONG_TERM_MONTH_THRESHOLD)
-
-    def variance(col: str) -> float | None:
-        if col not in hist.columns:
-            return None
-        series = pd.to_numeric(hist[col], errors="coerce").dropna()
-        if len(series) < 2:
-            return None
-        return float(series.std(ddof=0))
-
     return {
         "contract_duration_months": duration_months,
-        "cm_variance": variance("cm_db"),
-        "is_long_term": is_long,
-        "revenue_variance": variance("revenue_total"),
+        "cm_variance": _variance(hist, "cm_db"),
+        "is_long_term": duration_months is not None and duration_months >= LONG_TERM_MONTH_THRESHOLD,
+        "revenue_variance": _variance(hist, "revenue_total"),
+    }
+
+
+def _revenue_total(row: pd.Series) -> float:
+    """Revenue for a single period. Prefer `revenue_total`, fall back to the
+    sum of the three stream columns when the total is missing."""
+    total = _maybe_float(row.get("revenue_total"))
+    if total is not None:
+        return total
+    return sum(_safe_float(row.get(col)) for _key, col in REVENUE_STREAM_COLUMNS)
+
+
+def _revenue_trend_metrics(history: pd.DataFrame) -> dict:
+    hist = _sorted_history(history)
+    if hist.empty:
+        return dict(_EMPTY_REVENUE_TREND)
+    latest = hist.iloc[-1]
+    rev_now = _revenue_total(latest)
+
+    mom_delta: float | None = None
+    six_m_delta: float | None = None
+    top_cat: str | None = None
+    top_delta: float | None = None
+    trend_dir = "no_data"
+
+    if len(hist) >= 2:
+        prev = hist.iloc[-2]
+        rev_prev = _revenue_total(prev)
+        mom_delta = rev_now - rev_prev
+
+        # Classify "flat" vs "up"/"down": the movement must clear BOTH the
+        # absolute floor AND the relative floor, otherwise it's noise.
+        scale = max(abs(rev_now), abs(rev_prev))
+        rel_eps = scale * _REVENUE_TREND_REL_EPS
+        if abs(mom_delta) < max(_REVENUE_TREND_ABS_EPS, rel_eps):
+            trend_dir = "flat"
+        else:
+            trend_dir = "down" if mom_delta < 0 else "up"
+
+        # Top declining stream: biggest (most negative) per-stream MoM delta.
+        worst = 0.0
+        for key, col in REVENUE_STREAM_COLUMNS:
+            if col not in hist.columns:
+                continue
+            delta = _safe_float(latest.get(col)) - _safe_float(prev.get(col))
+            # Tie-break by list order (stable when equal): strict `<` only.
+            if delta < worst:
+                worst = delta
+                top_cat = key
+                top_delta = delta
+
+        prior = hist.iloc[:-1].tail(6)
+        if not prior.empty:
+            six_m_delta = rev_now - float(np.mean(
+                [_revenue_total(r) for _, r in prior.iterrows()]
+            ))
+
+    return {
+        "revenue_mom_delta_eur": mom_delta,
+        "revenue_6m_delta_eur": six_m_delta,
+        "top_revenue_decline_cat": top_cat,
+        "top_revenue_decline_eur": top_delta,
+        "revenue_trend_dir": trend_dir,
     }
 
 
 def _percentile_score(values: list[float], x: float | None,
                       higher_is_worse: bool) -> float:
-    """0-100, 100 = best, 0 = worst.
-
-    When `higher_is_worse` is True, the largest value in the set scores 0.
-    When False, the largest value scores 100. NaN / None `x` returns the
-    neutral default.
-    """
-    clean = [v for v in values if v is not None and not (isinstance(v, float)
-                                                         and np.isnan(v))]
+    """0-100, 100 = best, 0 = worst. Mid-rank among ties."""
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return SMALL_SET_SCORE_DEFAULT
-    if len(clean) < MIN_SET_FOR_PERCENTILE:
-        return SMALL_SET_SCORE_DEFAULT
+    clean = [v for v in values
+             if v is not None and not (isinstance(v, float) and np.isnan(v))]
     n = len(clean)
+    if n < MIN_SET_FOR_PERCENTILE:
+        return SMALL_SET_SCORE_DEFAULT
     below = sum(1 for v in clean if v < x)
     equal = sum(1 for v in clean if v == x)
-    # Mid-rank among ties, normalised to 0..1 then scaled to 0..100.
     rank_pct = 100.0 * (below + 0.5 * equal) / n
     return (100.0 - rank_pct) if higher_is_worse else rank_pct
 
 
 def _compute_scores(rows: list[dict]) -> list[dict]:
-    """Add the five score fields to each row in-place, return the list."""
+    """Add the five score fields to each row in-place, return the list.
+
+    Expects each row to already carry the ``eff_badness`` key produced by
+    ``_efficiency_metrics``. Missing → treated as an unranked row (default 50).
+    """
     unrent_vals = [r["unrent_now_eur"] for r in rows]
     total_cost_vals = [r["total_cost_increase_pct"] for r in rows]
-
-    def eff_badness(r: dict) -> float | None:
-        diff = r["hours_planned_minus_productive"]
-        if diff is None:
-            return None
-        hp = r.get("_hours_planned") or 0.0
-        if hp <= 0:
-            return None
-        return abs(diff) / hp
-
-    eff_vals = [eff_badness(r) for r in rows]
+    eff_vals = [r.get("eff_badness") for r in rows]
     duration_vals = [r["contract_duration_months"] for r in rows]
     cm_var_vals = [r["cm_variance"] for r in rows]
     rev_var_vals = [r["revenue_variance"] for r in rows]
 
     for r in rows:
-        prof = _percentile_score(unrent_vals, r["unrent_now_eur"],
-                                 higher_is_worse=True)
-        cost = _percentile_score(total_cost_vals, r["total_cost_increase_pct"],
-                                 higher_is_worse=True)
-        eff = _percentile_score(eff_vals, eff_badness(r), higher_is_worse=True)
-
-        dur_score = _percentile_score(duration_vals,
-                                      r["contract_duration_months"],
-                                      higher_is_worse=False)
-        cmv_score = _percentile_score(cm_var_vals, r["cm_variance"],
-                                      higher_is_worse=True)
-        rv_score = _percentile_score(rev_var_vals, r["revenue_variance"],
-                                     higher_is_worse=True)
+        prof = _percentile_score(unrent_vals, r["unrent_now_eur"], True)
+        cost = _percentile_score(total_cost_vals, r["total_cost_increase_pct"], True)
+        eff = _percentile_score(eff_vals, r.get("eff_badness"), True)
+        dur_score = _percentile_score(duration_vals, r["contract_duration_months"], False)
+        cmv_score = _percentile_score(cm_var_vals, r["cm_variance"], True)
+        rv_score = _percentile_score(rev_var_vals, r["revenue_variance"], True)
         stab = float(np.mean([dur_score, cmv_score, rv_score]))
-
         overall = float(np.mean([prof, cost, eff, stab]))
 
         r["profitability_score"] = round(prof, 1)
@@ -364,57 +582,47 @@ def _compute_scores(rows: list[dict]) -> list[dict]:
     return rows
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
 def compute_metrics(rankings: list[ContractRanking],
                     df: pd.DataFrame) -> list[ContractMetrics]:
-    """Build a ContractMetrics per ranking using the per-contract history in `df`.
-
-    `df` is the full (optionally filtered) dataset from which `rankings` was
-    built. We look up each contract's history by `cost_center_id` so metrics
-    can consult every row the UI considers visible.
-    """
+    """Build a ContractMetrics per ranking using per-contract history in `df`."""
     if not rankings:
         return []
     if df is None or df.empty or "cost_center_id" not in df.columns:
         return []
 
-    grouped = {str(cc): hist for cc, hist in df.groupby("cost_center_id",
-                                                        sort=False)}
+    grouped = {str(cc): hist
+               for cc, hist in df.groupby("cost_center_id", sort=False)}
 
     intermediate: list[dict] = []
     for r in rankings:
         hist = grouped.get(str(r.cost_center_id), pd.DataFrame())
-        prof = _profitability_metrics(hist)
-        cost = _cost_structure_metrics(hist)
-        eff = _efficiency_metrics(hist)
-        stab = _stability_metrics(hist)
-
-        hp_latest = 0.0
-        if not hist.empty and "hours_planned" in hist.columns:
-            last_hp = hist.sort_values("period").iloc[-1].get("hours_planned")
-            hp_latest = _safe_float(last_hp)
-
         intermediate.append({
             "base": r,
-            **prof, **cost, **eff, **stab,
-            "_hours_planned": hp_latest,
+            **_profitability_metrics(hist),
+            **_cost_structure_metrics(hist),
+            **_efficiency_metrics(hist),
+            **_stability_metrics(hist),
+            **_revenue_trend_metrics(hist),
         })
 
     _compute_scores(intermediate)
 
     out: list[ContractMetrics] = []
     for row in intermediate:
-        row.pop("_hours_planned", None)
+        row.pop("eff_badness", None)
         out.append(ContractMetrics(**row))
     return out
 
 
 __all__ = [
     "ContractMetrics",
+    "ContractOverviewMetrics",
     "COST_CATEGORY_COLUMNS",
     "LONG_TERM_MONTH_THRESHOLD",
+    "REVENUE_STREAM_COLUMNS",
+    "compute_contract_overview_metrics",
     "compute_metrics",
+    "compute_rankings",
+    "safe_pct_change",
 ]
-
-
-# Re-export for test convenience.
-_ = compute_rankings  # keep import used

@@ -1,11 +1,6 @@
 """Shared logic for the single-facility overview.
 
-This module centralises the driver classification, action mapping, and
-status-level computation that were previously embedded in the Streamlit
-`pages/1_Portfolio_Overview.py` page, so the FastAPI layer can reuse them.
-
-No i18n is applied here — we return i18n *keys*, and let the UI layer
-translate them. This keeps the backend response stable across locales.
+Returns i18n keys, not translated strings, so the response is locale-stable.
 """
 from __future__ import annotations
 
@@ -20,7 +15,6 @@ from src import drivers
 StatusLevel = Literal["critical", "warn", "healthy"]
 
 
-# --- Driver class -> (icon, i18n key prefix, default action key) ---
 DRIVER_ICON: dict[str, tuple[str, str, str | None]] = {
     "labor":         ("", "driver.labor",         "shift"),
     "subcontractor": ("", "driver.subcontractor", "subcontractor"),
@@ -34,62 +28,59 @@ DRIVER_ICON: dict[str, tuple[str, str, str | None]] = {
 }
 
 
-# --- Action catalogue with estimated impact (ratio points, e.g. 0.032 = +3.2 pp) ---
+def _action(key: str, impact: float) -> dict:
+    return {
+        "icon": "",
+        "title_key": f"action.{key}.title",
+        "sub_key": f"action.{key}.sub",
+        "why_key": f"action.{key}.why",
+        "impact": impact,
+    }
+
+
+# Impact is ratio points (0.032 = +3.2 pp).
 ACTIONS: dict[str, dict] = {
-    "shift":         {"icon": "", "title_key": "action.shift.title",
-                      "sub_key": "action.shift.sub",
-                      "why_key": "action.shift.why", "impact": 0.032},
-    "absence":       {"icon": "", "title_key": "action.absence.title",
-                      "sub_key": "action.absence.sub",
-                      "why_key": "action.absence.why", "impact": 0.015},
-    "onboarding":    {"icon": "", "title_key": "action.onboarding.title",
-                      "sub_key": "action.onboarding.sub",
-                      "why_key": "action.onboarding.why", "impact": 0.008},
-    "subcontractor": {"icon": "", "title_key": "action.subcontractor.title",
-                      "sub_key": "action.subcontractor.sub",
-                      "why_key": "action.subcontractor.why", "impact": 0.020},
-    "pricing":       {"icon": "", "title_key": "action.pricing.title",
-                      "sub_key": "action.pricing.sub",
-                      "why_key": "action.pricing.why", "impact": 0.025},
-    "productivity":  {"icon": "", "title_key": "action.productivity.title",
-                      "sub_key": "action.productivity.sub",
-                      "why_key": "action.productivity.why", "impact": 0.012},
+    "shift":         _action("shift",         0.032),
+    "absence":       _action("absence",       0.015),
+    "onboarding":    _action("onboarding",    0.008),
+    "subcontractor": _action("subcontractor", 0.020),
+    "pricing":       _action("pricing",       0.025),
+    "productivity":  _action("productivity",  0.012),
 }
 
 
+_DRIVER_NAME_RULES: list[tuple[tuple[str, ...], str]] = [
+    (("vacation", "sick"),    "absence"),
+    (("labor",),              "labor"),
+    (("sub",),                "subcontractor"),
+    (("training", "onboard"), "training"),
+    (("material",),           "material"),
+    (("vehicle", "travel"),   "vehicle"),
+]
+
+
 def classify_driver(d: drivers.Driver) -> str:
-    """Collapse the detailed Driver name into a compact class key."""
-    n = d.name.lower()
     if d.kind == "revenue":
         return "revenue_up" if d.delta_eur >= 0 else "revenue"
-    if "vacation" in n or "sick" in n:
-        return "absence"
-    if "labor" in n:
-        return "labor"
-    if "sub" in n:
-        return "subcontractor"
-    if "training" in n or "onboard" in n:
-        return "training"
-    if "material" in n:
-        return "material"
-    if "vehicle" in n or "travel" in n:
-        return "vehicle"
+    n = d.name.lower()
+    for needles, cls in _DRIVER_NAME_RULES:
+        if any(k in n for k in needles):
+            return cls
     return "other"
 
 
 def driver_pct_change(d: drivers.Driver) -> float | None:
-    """Percent change of the driver vs its baseline (for row labels)."""
-    if d.baseline == 0:
-        return None
-    return (d.current - d.baseline) / abs(d.baseline)
+    # Cost drivers only; sign-flipping would already be a data oddity.
+    # Local import avoids a cycle (contract_metrics → portfolio_ranking → here).
+    from src.contract_metrics import safe_pct_change
+
+    return safe_pct_change(d.current, d.baseline)
 
 
 def status_for(margin: float | None, mom: float | None) -> StatusLevel:
     if margin is None or pd.isna(margin):
         return "warn"
-    if margin < 0:
-        return "critical"
-    if mom is not None and mom <= -0.03:
+    if margin < 0 or (mom is not None and mom <= -0.03):
         return "critical"
     if margin < 0.03 or (mom is not None and mom < 0):
         return "warn"
@@ -101,8 +92,7 @@ def emoji_for(service: str | None, name: str | None) -> str:
 
 
 def sparkline_values(hist: pd.DataFrame, n: int = 6) -> list[float]:
-    """Margin % of the last N months for a single-cost-center frame."""
-    tail = hist.tail(n).copy()
+    tail = hist.tail(n)
     if tail.empty or "revenue_total" not in tail.columns:
         return []
     rev = tail["revenue_total"].where(tail["revenue_total"] != 0, pd.NA)
@@ -112,30 +102,21 @@ def sparkline_values(hist: pd.DataFrame, n: int = 6) -> list[float]:
 
 def category_series(focus: pd.DataFrame, category: str, n: int = 12
                     ) -> tuple[list[float], list[pd.Timestamp]]:
-    """Return (values, periods) for the last ``n`` months of one category.
-
-    ``focus`` is expected to be a single-cost-center frame, sorted by period.
-    ``category`` is one of:
-      - "revenue" -> ``revenue_total``
-      - "costs"   -> ``revenue_total - cm_db``
-      - "cm"      -> ``cm_db``
-    """
     if focus.empty or "revenue_total" not in focus.columns or "cm_db" not in focus.columns:
         return [], []
-    tail = focus.tail(n).copy()
+    tail = focus.tail(n)
     rev = tail["revenue_total"].fillna(0.0)
     cm = tail["cm_db"].fillna(0.0)
     if category == "revenue":
         vals = rev
     elif category == "costs":
         vals = rev - cm
-    else:  # "cm"
+    else:
         vals = cm
     return [float(v) for v in vals.tolist()], list(tail["period"].tolist())
 
 
 def linear_trend(values: list[float]) -> list[float]:
-    """Fit a least-squares line to ``values`` over x = 0..n-1 and return ys."""
     import numpy as np
 
     n = len(values)
@@ -147,10 +128,9 @@ def linear_trend(values: list[float]) -> list[float]:
 
 
 def pick_focus_cost_center(df: pd.DataFrame, override: str | None = None) -> str | None:
-    """Pick the 'focus' cost center (worst CM) if no override is given."""
-    if override is not None and "cost_center_id" in df.columns:
-        if override in df["cost_center_id"].unique():
-            return override
+    if (override is not None and "cost_center_id" in df.columns
+            and override in df["cost_center_id"].unique()):
+        return override
     if "cm_db" not in df.columns:
         return None
     cand = df[df["cm_db"] < 0].sort_values("cm_db")
@@ -207,9 +187,7 @@ def _row_str(row: pd.Series, col: str) -> str | None:
     if col not in row.index:
         return None
     v = row[col]
-    if pd.isna(v):
-        return None
-    return str(v)
+    return None if pd.isna(v) else str(v)
 
 
 def _row_float(row: pd.Series, col: str) -> float:
@@ -222,57 +200,48 @@ def _row_float(row: pd.Series, col: str) -> float:
         return 0.0
 
 
-def worst_drivers_for(current: pd.Series, baseline: pd.Series,
-                      limit: int = 3) -> list[DriverItem]:
-    """Top `limit` drivers with negative ΔCM, deduped by class key."""
-    all_drivers = drivers.decompose(current, baseline)
-    out: list[DriverItem] = []
+def _dedup_classified(all_drivers, *, keep) -> list:
+    out = []
     seen: set[str] = set()
-    for d in sorted(all_drivers, key=lambda x: x.delta_eur):
-        if d.delta_eur >= 0:
-            break
+    for d in all_drivers:
+        if not keep(d):
+            continue
         cls = classify_driver(d)
         if cls in seen or cls not in DRIVER_ICON:
             continue
         seen.add(cls)
-        icon, key_prefix, _ = DRIVER_ICON[cls]
-        out.append(DriverItem(
-            class_key=cls,
-            icon=icon,
-            title_key=key_prefix,
-            sub_key=f"{key_prefix}.sub",
-            pct_change=driver_pct_change(d),
-            delta_eur=d.delta_eur,
-        ))
-        if len(out) >= limit:
-            break
+        out.append((cls, d))
     return out
+
+
+def worst_drivers_for(current: pd.Series, baseline: pd.Series,
+                      limit: int = 3) -> list[DriverItem]:
+    all_drivers = sorted(drivers.decompose(current, baseline),
+                         key=lambda x: x.delta_eur)
+    items: list[DriverItem] = []
+    for cls, d in _dedup_classified(all_drivers, keep=lambda x: x.delta_eur < 0):
+        icon, key_prefix, _ = DRIVER_ICON[cls]
+        items.append(DriverItem(
+            class_key=cls, icon=icon, title_key=key_prefix,
+            sub_key=f"{key_prefix}.sub",
+            pct_change=driver_pct_change(d), delta_eur=d.delta_eur,
+        ))
+        if len(items) >= limit:
+            break
+    return items
 
 
 def worst_cost_drivers(current: pd.Series, baseline: pd.Series,
                        limit: int = 3) -> list[drivers.Driver]:
-    """Top ``limit`` cost drivers whose EUR rose the most MoM.
-
-    Unlike ``worst_drivers_for``, this filters to ``kind='cost'`` and
-    ranks by the increase in that cost line's EUR (current - baseline),
-    not by margin contribution. Revenue drops are intentionally excluded
-    so the UI can show a pure "what drove cost up?" view.
-
-    ``delta_eur`` on a cost driver is already ``-(cost_cur - cost_base)``,
-    so a larger cost increase appears as a more-negative ``delta_eur`` —
-    ranking ascending gives us the biggest-increase-first order.
-    """
-    all_drivers = drivers.decompose(current, baseline)
-    cost_only = [d for d in all_drivers
-                 if d.kind == "cost" and d.current > d.baseline]
-    cost_only.sort(key=lambda d: d.delta_eur)
+    # Cost-only view: rank by biggest MoM EUR increase. `delta_eur` on a cost
+    # driver is `-(cost_cur - cost_base)`, so ascending = biggest-increase-first.
+    cost_only = sorted(
+        (d for d in drivers.decompose(current, baseline)
+         if d.kind == "cost" and d.current > d.baseline),
+        key=lambda d: d.delta_eur,
+    )
     out: list[drivers.Driver] = []
-    seen: set[str] = set()
-    for d in cost_only:
-        cls = classify_driver(d)
-        if cls in seen or cls not in DRIVER_ICON:
-            continue
-        seen.add(cls)
+    for _cls, d in _dedup_classified(cost_only, keep=lambda _d: True):
         out.append(d)
         if len(out) >= limit:
             break
@@ -281,7 +250,6 @@ def worst_cost_drivers(current: pd.Series, baseline: pd.Series,
 
 def recommended_actions_for(driver_items: list[DriverItem],
                             limit: int = 3) -> list[ActionItem]:
-    """Map drivers → up-to-`limit` action recommendations (deduped)."""
     keys: list[str] = []
     for di in driver_items:
         mapped = DRIVER_ICON[di.class_key][2]
@@ -292,7 +260,6 @@ def recommended_actions_for(driver_items: list[DriverItem],
             break
         if fallback not in keys:
             keys.append(fallback)
-    keys = keys[:limit]
     return [
         ActionItem(
             key=k, icon=ACTIONS[k]["icon"],
@@ -300,14 +267,13 @@ def recommended_actions_for(driver_items: list[DriverItem],
             sub_key=ACTIONS[k]["sub_key"],
             impact_pct=ACTIONS[k]["impact"],
         )
-        for k in keys
+        for k in keys[:limit]
     ]
 
 
 def build(df: pd.DataFrame, cost_center_id: str | None = None,
           period: pd.Timestamp | None = None) -> FacilityOverview | None:
-    """Compute the full facility-overview payload for one CC × one month."""
-    from src import sim  # local import to avoid circulars
+    from src import sim  # local import avoids a circular
 
     cc_id = pick_focus_cost_center(df, override=cost_center_id)
     if cc_id is None:
@@ -317,11 +283,8 @@ def build(df: pd.DataFrame, cost_center_id: str | None = None,
     if focus.empty:
         return None
 
-    if period is not None:
-        focus_month = focus[focus["period"] == period]
-        if focus_month.empty:
-            focus_month = focus.tail(1)
-    else:
+    focus_month = focus[focus["period"] == period] if period is not None else focus.tail(0)
+    if focus_month.empty:
         focus_month = focus.tail(1)
     current_row = focus_month.iloc[-1]
 
@@ -331,8 +294,9 @@ def build(df: pd.DataFrame, cost_center_id: str | None = None,
 
     prior = focus[focus["period"] < current_row["period"]]
     prior_row = prior.iloc[-1] if not prior.empty else None
-    if prior_row is not None and _row_float(prior_row, "revenue_total") > 0:
-        margin_prev = _row_float(prior_row, "cm_db") / _row_float(prior_row, "revenue_total")
+    prior_rev = _row_float(prior_row, "revenue_total") if prior_row is not None else 0.0
+    if prior_row is not None and prior_rev > 0:
+        margin_prev = _row_float(prior_row, "cm_db") / prior_rev
         margin_mom: float | None = (margin_cur or 0) - margin_prev
     else:
         margin_mom = None

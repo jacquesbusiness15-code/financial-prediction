@@ -1,14 +1,9 @@
 """Schema contract for the WISAG dataset.
 
-Primary:  HEADER_MAP  - German header text  -> semantic name (robust).
-Fallback: COLUMN_MAP  - Excel column letter -> semantic name (position-based;
-          used only when the file has no recognizable WISAG headers).
-
-`SCHEMA` is the single source of truth for dtype, nullability, and semantic
-group. Column-group constants (`REVENUE_COLS`, `COST_COLS_DB`, `DIMENSIONS`,
-etc.) are derived from it so they cannot drift out of sync. Bump
-`SCHEMA_VERSION` whenever the contract changes - it's part of the parquet
-cache key, so a bump invalidates every stored cache automatically.
+HEADER_MAP (German header -> semantic name) is primary; COLUMN_MAP (Excel
+letter -> semantic name) is the position-based fallback. SCHEMA declares
+dtype + group per semantic column. Bump SCHEMA_VERSION to invalidate every
+parquet cache (the version is part of the cache key).
 """
 
 from openpyxl.utils import column_index_from_string
@@ -91,21 +86,10 @@ HEADER_MAP: dict[str, str] = {
     "UserName": "user_name",
 }
 
-# Dtype tags used by the loader and parquet cache.
-#   "Int64"            -> nullable integer (pandas extension dtype)
-#   "float64"          -> numeric, NaN-friendly
-#   "string"           -> pandas nullable string
-#   "category"         -> low-cardinality string stored as category
-#   "datetime64[ns]"   -> timestamp (parsed via pd.to_datetime)
-#   "boolean"          -> nullable bool
-#
-# Group tag is used to derive the column-group constants further down.
 SCHEMA: dict[str, tuple[str, str]] = {
-    # identity
     "row_id":                        ("Int64",          "meta"),
     "year":                          ("Int64",          "meta"),
     "month":                         ("Int64",          "meta"),
-    # dimensions
     "region":                        ("category",       "dimension"),
     "entity":                        ("category",       "dimension"),
     "short_description":             ("string",         "dimension"),
@@ -129,14 +113,12 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "analysis_category":             ("string",         "dimension"),
     "manager_comment":               ("string",         "dimension"),
     "user_name":                     ("string",         "dimension"),
-    # revenue
     "accrual_adjustment":            ("float64",        "revenue"),
     "revenue_total":                 ("float64",        "revenue"),
     "revenue_fixed":                 ("float64",        "revenue"),
     "revenue_hourly":                ("float64",        "revenue"),
     "revenue_other":                 ("float64",        "revenue"),
     "contracted_fixed_price":        ("float64",        "revenue"),
-    # costs
     "subcontractor_group":           ("float64",        "cost"),
     "subcontractor_division":        ("float64",        "cost"),
     "internal_service_el1":          ("float64",        "cost"),
@@ -154,14 +136,12 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "internal_service_total":        ("float64",        "cost"),
     "subcontractor_services_total":  ("float64",        "cost"),
     "services_total_excl_training":  ("float64",        "cost"),
-    # contribution margins
     "cm_db":                         ("float64",        "cm"),
     "cm_db_pct":                     ("float64",        "cm"),
     "cm_db1":                        ("float64",        "cm"),
     "cm_db1_pct":                    ("float64",        "cm"),
     "cm_db2":                        ("float64",        "cm"),
     "cm_db2_pct":                    ("float64",        "cm"),
-    # hours
     "hours_actual":                  ("float64",        "hours"),
     "hours_break":                   ("float64",        "hours"),
     "hours_planned":                 ("float64",        "hours"),
@@ -172,15 +152,12 @@ SCHEMA: dict[str, tuple[str, str]] = {
     "subcontractor_hours_training":  ("float64",        "hours"),
     "hour_variance":                 ("float64",        "hours"),
     "cost_variance":                 ("float64",        "hours"),
-    # plan targets
     "cm_planned":                    ("float64",        "plan"),
     "plan_subcontractor_ratio":      ("float64",        "plan"),
     "plan_labor_cost_ratio":         ("float64",        "plan"),
     "plan_overhead_factor":          ("float64",        "plan"),
-    # quality
     "quality_target":                ("float64",        "quality"),
     "quality_actual":                ("float64",        "quality"),
-    # contract lifecycle
     "contract_start":                ("datetime64[ns]", "contract"),
     "contract_end":                  ("datetime64[ns]", "contract"),
 }
@@ -271,16 +248,11 @@ COLUMN_MAP: dict[str, str] = {
 }
 
 
-def _cols_in_group(tag: str) -> list[str]:
-    return [name for name, (_, g) in SCHEMA.items() if g == tag]
-
-
-# Groups used across features/drivers/benchmarks. Derived from SCHEMA so they
-# cannot drift out of sync.
 REVENUE_COLS = ["revenue_total"]
 REVENUE_BREAKDOWN_COLS = ["revenue_fixed", "revenue_hourly", "revenue_other"]
 
-COST_COLS_DB = [  # costs above DB (labor, subcontracting, travel, internal services)
+# Costs above DB (labor, subcontracting, travel, internal services).
+COST_COLS_DB = [
     "subcontractor_group",
     "subcontractor_division",
     "subcontractor_external",
@@ -289,8 +261,8 @@ COST_COLS_DB = [  # costs above DB (labor, subcontracting, travel, internal serv
     "travel_cost",
     "labor_cost_total",
 ]
-COST_COLS_DB1_EXTRA = ["material_cost"]        # DB -> DB1 adds material
-COST_COLS_DB2_EXTRA = ["vehicle_cost"]         # DB1 -> DB2 adds vehicle
+COST_COLS_DB1_EXTRA = ["material_cost"]
+COST_COLS_DB2_EXTRA = ["vehicle_cost"]
 
 LABOR_SUBCOMPONENTS = [
     "labor_direct",
@@ -314,6 +286,13 @@ DIMENSIONS = ["region", "entity", "cost_center_id", "cost_center_name",
               "billing_type", "abc_class"]
 
 
+# Early-warning tuning. Slopes are measured in percentage-points per month on
+# `cm_db_pct`; the threshold keeps micro-drift (e.g. -0.01 pp/mo) off the board.
+EARLY_WARNING_SLOPE_THRESHOLD_PP = -0.5
+# Subcontractor creep: how much the actual subcontractor share may exceed the
+# planned ratio (both expressed as fractions) before we raise a flag.
+SUBCONTRACTOR_CREEP_THRESHOLD = 0.10
+
+
 def col_letter_to_index(letter: str) -> int:
-    """Convert 'A'..'BU' to a zero-based column index."""
     return column_index_from_string(letter) - 1

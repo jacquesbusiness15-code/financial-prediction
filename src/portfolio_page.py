@@ -1,19 +1,14 @@
-"""Portfolio landing page: KPI bar + filters + searchable, selectable contract table.
-
-Replaces the previous single-contract overview as the landing view. Row selection
-stores the chosen `cost_center_id` in `st.session_state["selected_cost_center"]`
-so `app.py` can dispatch to the detail view on the next rerun.
-"""
+"""Portfolio landing page: KPI bar, filters, searchable selectable contract table."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from html import escape
+from typing import Callable
 
 import pandas as pd
 import streamlit as st
 
 from src import facility_overview as fov
-from src.components import section_card
 from src.contract_metrics import ContractMetrics, compute_metrics
 from src.i18n import t
 from src.portfolio_ranking import (
@@ -24,6 +19,57 @@ from src.portfolio_ranking import (
 )
 from src.viz_svg import area_chart
 
+
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
+_DASH = "—"
+
+
+def _fmt_eur(v) -> str:
+    if v is None or pd.isna(v):
+        return _DASH
+    return f"{v:,.0f} €".replace(",", ".")
+
+
+def _fmt_period(p) -> str:
+    if p is None or pd.isna(p):
+        return _DASH
+    return pd.Timestamp(p).strftime("%b %Y")
+
+
+def _fmt_eur_signed(v) -> str:
+    if v is None or pd.isna(v):
+        return _DASH
+    sign = "+" if v > 0 else ("−" if v < 0 else "")
+    return f"{sign}{abs(v):,.0f} €".replace(",", ".")
+
+
+def _fmt_hours(v) -> str:
+    if v is None or pd.isna(v):
+        return _DASH
+    sign = "+" if v > 0 else ("−" if v < 0 else "")
+    return f"{sign}{abs(v):,.0f} h".replace(",", ".")
+
+
+def _fmt_pct_signed(v) -> str:
+    # `safe_pct_change` already gates out noise-level ratios upstream, so the
+    # caller either passes a sane number or None.
+    if v is None or pd.isna(v):
+        return _DASH
+    return f"{v * 100:+.1f} %".replace(".", ",")
+
+
+def _fmt_pp_signed(v) -> str:
+    if v is None or pd.isna(v):
+        return _DASH
+    return f"{v:+.1f} %".replace(".", ",")
+
+
+# ---------------------------------------------------------------------------
+# Overview block (big title + category pills + 12-month chart)
+# ---------------------------------------------------------------------------
 
 _OVERVIEW_CATEGORY_KEYS: list[tuple[str, str]] = [
     ("revenue", "overview.cat.revenue"),
@@ -41,10 +87,6 @@ def _aggregate_portfolio_totals(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _render_portfolio_overview_block(df: pd.DataFrame) -> None:
-    """Big "Overview" title + category pill bar + 12-month regression chart.
-
-    Aggregates `revenue_total` and `cm_db` across all cost centers per period.
-    """
     st.markdown(
         f"<h1 class='wisag-overview-title'>{escape(t('overview.section_title'))}</h1>",
         unsafe_allow_html=True,
@@ -55,46 +97,44 @@ def _render_portfolio_overview_block(df: pd.DataFrame) -> None:
 @st.fragment
 def _render_overview_fragment(df: pd.DataFrame) -> None:
     state_key = "portfolio_overview_cat"
+    allowed = {k for k, _ in _OVERVIEW_CATEGORY_KEYS}
     current = st.session_state.get(state_key, "revenue")
-    if current not in {k for k, _ in _OVERVIEW_CATEGORY_KEYS}:
+    if current not in allowed:
         current = "revenue"
 
     st.markdown("<div class='wisag-cat-bar'>", unsafe_allow_html=True)
     cols = st.columns(3, gap="small")
     for col, (key, label_key) in zip(cols, _OVERVIEW_CATEGORY_KEYS):
         with col:
-            btn_type = "primary" if key == current else "secondary"
             if st.button(
                 t(label_key),
                 key=f"portfolio_cat_{key}",
-                type=btn_type,
+                type=("primary" if key == current else "secondary"),
                 use_container_width=True,
             ):
                 st.session_state[state_key] = key
+                st.rerun(scope="fragment")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    if df.empty or "period" not in df.columns \
-            or "revenue_total" not in df.columns or "cm_db" not in df.columns:
+    required = ("period", "revenue_total", "cm_db")
+    if df.empty or any(c not in df.columns for c in required):
         st.info(t("overview.no_focus"))
         return
 
-    agg = _aggregate_portfolio_totals(df)
-
-    values, periods = fov.category_series(agg, current, n=12)
+    values, periods = fov.category_series(_aggregate_portfolio_totals(df), current, n=12)
     if len(values) < 2:
         st.info(t("overview.no_focus"))
         return
 
     trend = fov.linear_trend(values)
-    declining = trend[-1] < trend[0]
+    # Red = bad, green = good. Rising costs are bad; rising revenue/CM are good.
+    rising = values[-1] > values[0]
+    bad_trend = rising if current == "costs" else not rising
     svg = area_chart(
         values, periods,
-        declining=declining,
-        y_as_pct=False,
-        value_fmt="eur",
-        trendline=trend,
+        declining=bad_trend,
+        y_as_pct=False, value_fmt="eur", trendline=trend,
     )
-
     st.markdown(
         "<div class='wisag-chart-wrap'>"
         f"<p class='wisag-section-sub'>{escape(t('overview.trend_sub'))}</p>"
@@ -103,6 +143,10 @@ def _render_overview_fragment(df: pd.DataFrame) -> None:
         unsafe_allow_html=True,
     )
 
+
+# ---------------------------------------------------------------------------
+# Filter state + filter bar
+# ---------------------------------------------------------------------------
 
 REASON_KEYS = ["labor", "absence", "training", "subcontractor",
                "material", "vehicle", "revenue", "other"]
@@ -120,27 +164,25 @@ class FilterState:
     show_profitable: bool = True
 
 
-def _fmt_eur(v: float | None) -> str:
-    if v is None or pd.isna(v):
-        return "—"
-    return f"{v:,.0f} €".replace(",", ".")
-
-
-def _fmt_period(p: pd.Timestamp | None) -> str:
-    if p is None or pd.isna(p):
-        return "—"
-    return pd.Timestamp(p).strftime("%b %Y")
-
-
 def _distinct(df: pd.DataFrame, col: str) -> list[str]:
     if col not in df.columns:
         return []
-    vals = df[col].dropna().unique().tolist()
-    return sorted({str(v) for v in vals})
+    return sorted({str(v) for v in df[col].dropna().unique()})
+
+
+_FILTER_RESET_KEYS = (
+    "portfolio_search",
+    "portfolio_filter_region",
+    "portfolio_filter_client",
+    "portfolio_filter_branch",
+    "portfolio_filter_reason",
+    "portfolio_filter_cost_center",
+    "portfolio_filter_month",
+    "portfolio_show_profitable",
+)
 
 
 def _render_filters(df: pd.DataFrame) -> FilterState:
-    """Render search + filter widgets at the top of the page."""
     state = FilterState()
 
     state.search = st.text_input(
@@ -162,25 +204,7 @@ def _render_filters(df: pd.DataFrame) -> FilterState:
             )
 
         with r1c2:
-            periods = sorted(df["period"].dropna().unique()) if "period" in df.columns else []
-            if len(periods) >= 2:
-                options = [pd.Timestamp(p) for p in periods]
-                labels = {p: p.strftime("%b %Y") for p in options}
-                if "portfolio_filter_month" not in st.session_state:
-                    st.session_state["portfolio_filter_month"] = (options[0], options[-1])
-                picked = st.select_slider(
-                    t("portfolio.filter_month"),
-                    options=options,
-                    format_func=lambda p: labels.get(pd.Timestamp(p),
-                                                    pd.Timestamp(p).strftime("%b %Y")),
-                    key="portfolio_filter_month",
-                )
-                if isinstance(picked, tuple) and len(picked) == 2:
-                    state.month_range = (pd.Timestamp(picked[0]), pd.Timestamp(picked[1]))
-            elif len(periods) == 1:
-                only = pd.Timestamp(periods[0])
-                st.caption(f"{t('portfolio.filter_month')}: {only.strftime('%b %Y')}")
-                state.month_range = (only, only)
+            state.month_range = _render_month_slider(df)
 
         with r1c3:
             state.clients = st.multiselect(
@@ -197,10 +221,9 @@ def _render_filters(df: pd.DataFrame) -> FilterState:
             )
 
         with r2c2:
-            reason_opts = REASON_KEYS
             state.reasons = st.multiselect(
                 t("portfolio.filter_reason"),
-                options=reason_opts,
+                options=REASON_KEYS,
                 format_func=lambda k: t(f"reason.{k}"),
                 key="portfolio_filter_reason",
             )
@@ -221,19 +244,35 @@ def _render_filters(df: pd.DataFrame) -> FilterState:
             )
         with reset_col:
             if st.button(t("portfolio.filters_reset"), use_container_width=True):
-                for key in (
-                    "portfolio_search",
-                    "portfolio_filter_region",
-                    "portfolio_filter_client",
-                    "portfolio_filter_branch",
-                    "portfolio_filter_reason",
-                    "portfolio_filter_cost_center",
-                    "portfolio_filter_month",
-                    "portfolio_show_profitable",
-                ):
+                for key in _FILTER_RESET_KEYS:
                     st.session_state.pop(key, None)
+                st.rerun(scope="fragment")
 
     return state
+
+
+def _render_month_slider(df: pd.DataFrame) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    periods = sorted(df["period"].dropna().unique()) if "period" in df.columns else []
+    if len(periods) >= 2:
+        options = [pd.Timestamp(p) for p in periods]
+        labels = {p: p.strftime("%b %Y") for p in options}
+        if "portfolio_filter_month" not in st.session_state:
+            st.session_state["portfolio_filter_month"] = (options[0], options[-1])
+        picked = st.select_slider(
+            t("portfolio.filter_month"),
+            options=options,
+            format_func=lambda p: labels.get(pd.Timestamp(p),
+                                             pd.Timestamp(p).strftime("%b %Y")),
+            key="portfolio_filter_month",
+        )
+        if isinstance(picked, tuple) and len(picked) == 2:
+            return (pd.Timestamp(picked[0]), pd.Timestamp(picked[1]))
+        return None
+    if len(periods) == 1:
+        only = pd.Timestamp(periods[0])
+        st.caption(f"{t('portfolio.filter_month')}: {only.strftime('%b %Y')}")
+        return (only, only)
+    return None
 
 
 def _slice_by_months(df: pd.DataFrame,
@@ -246,10 +285,12 @@ def _slice_by_months(df: pd.DataFrame,
     return df[(df["period"] >= lo) & (df["period"] <= hi)].copy()
 
 
+# ---------------------------------------------------------------------------
+# KPI bar
+# ---------------------------------------------------------------------------
+
 def _render_kpi_bar(rankings: list[ContractRanking]) -> None:
     stats = totals(rankings)
-    total_str = _fmt_eur(stats["total_unprofit_eur"])
-
     longest = stats["longest"]
     if longest is None or longest.months_unprofitable <= 0:
         longest_value = t("portfolio.kpi_none")
@@ -267,7 +308,7 @@ def _render_kpi_bar(rankings: list[ContractRanking]) -> None:
 
     left, right = st.columns(2)
     with left:
-        st.metric(t("portfolio.kpi_total_unprofit"), total_str)
+        st.metric(t("portfolio.kpi_total_unprofit"), _fmt_eur(stats["total_unprofit_eur"]))
         st.caption(t("portfolio.kpi_total_unprofit_sub"))
     with right:
         st.metric(t("portfolio.kpi_longest_unprofit"), longest_value)
@@ -276,23 +317,25 @@ def _render_kpi_bar(rankings: list[ContractRanking]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tab configuration — each of the five category tabs defines its own columns,
-# grid template, sort keys, default sort direction, and i18n header labels.
+# Tab + column configuration. One dict per tab, keyed by column slug.
+# Each column spec: (header_key, sort_dir_default, sort_value_fn, sort_missing_fn)
 # ---------------------------------------------------------------------------
 
 TAB_OVERALL = "overall"
 TAB_PROFITABILITY = "profitability"
+TAB_REVENUE = "revenue_trend"
 TAB_COST = "cost_structure"
 TAB_EFFICIENCY = "efficiency"
 TAB_STABILITY = "stability"
 
 _TAB_SLUGS: list[str] = [
-    TAB_OVERALL, TAB_PROFITABILITY, TAB_COST, TAB_EFFICIENCY, TAB_STABILITY,
+    TAB_PROFITABILITY, TAB_REVENUE, TAB_COST, TAB_EFFICIENCY, TAB_STABILITY,
 ]
 
 _TAB_LABEL_KEYS: dict[str, str] = {
     TAB_OVERALL:       "contracts.tab.overall",
     TAB_PROFITABILITY: "contracts.tab.profitability",
+    TAB_REVENUE:       "contracts.tab.revenue_trend",
     TAB_COST:          "contracts.tab.cost_structure",
     TAB_EFFICIENCY:    "contracts.tab.efficiency",
     TAB_STABILITY:     "contracts.tab.stability",
@@ -301,164 +344,158 @@ _TAB_LABEL_KEYS: dict[str, str] = {
 _GRID_TEMPLATE_BY_TAB: dict[str, str] = {
     TAB_OVERALL:       "grid-template-columns: 1.8fr 1fr 1fr 1fr 1fr 1.2fr 24px",
     TAB_PROFITABILITY: "grid-template-columns: 2fr 1.3fr 1.3fr 1.5fr 1fr 24px",
+    TAB_REVENUE:       "grid-template-columns: 2fr 1.3fr 1.3fr 1.5fr 1fr 24px",
     TAB_COST:          "grid-template-columns: 2fr 1.4fr 1.4fr 1fr 1.1fr 24px",
     TAB_EFFICIENCY:    "grid-template-columns: 2fr 1.2fr 1.2fr 1.2fr 1.1fr 24px",
     TAB_STABILITY:     "grid-template-columns: 2fr 1fr 1.2fr 1.2fr 1.1fr 24px",
 }
 
-_SORT_COLS_BY_TAB: dict[str, list[str]] = {
-    TAB_OVERALL:       ["contract", "score_prof", "score_cost", "score_eff",
-                        "score_stab", "score_overall"],
-    TAB_PROFITABILITY: ["contract", "unrent_mom", "unrent_6m", "top_cost_cat",
-                        "trend_mom"],
-    TAB_COST:          ["contract", "top_cost_cat_now", "top_cost_increase",
-                        "top_cost_increase_pct", "total_cost_pct"],
-    TAB_EFFICIENCY:    ["contract", "hours_diff", "ratio_mom", "ratio_6m",
-                        "hour_variance"],
-    TAB_STABILITY:     ["contract", "duration", "cm_variance", "long_short",
-                        "revenue_variance"],
-}
 
-# Default direction encodes "worst first" semantics per column.
-_DEFAULT_SORT_DIR_BY_TAB: dict[str, dict[str, str]] = {
+def _contract_sort(m: ContractMetrics) -> str:
+    return (m.base.cost_center_name or m.base.cost_center_id or "").lower()
+
+
+def _missing_attr(attr: str) -> Callable[[ContractMetrics], bool]:
+    return lambda m: getattr(m, attr) is None
+
+
+def _float_attr(attr: str, default: float = 0.0) -> Callable[[ContractMetrics], float]:
+    return lambda m: float(getattr(m, attr) or default)
+
+
+def _str_attr(attr: str) -> Callable[[ContractMetrics], str]:
+    return lambda m: (getattr(m, attr) or "").lower()
+
+
+_NEVER_MISSING = lambda m: False
+
+# One tuple per column: (header_i18n_key, default_sort_dir, sort_value_fn, is_missing_fn)
+_TAB_COLUMNS: dict[str, dict[str, tuple[str, str, Callable, Callable]]] = {
     TAB_OVERALL: {
-        "contract": "asc",
-        "score_prof": "asc", "score_cost": "asc", "score_eff": "asc",
-        "score_stab": "asc", "score_overall": "asc",
+        "contract":      ("portfolio.col_contract",             "asc",  _contract_sort, _NEVER_MISSING),
+        "score_prof":    ("contracts.col.score_profitability",  "asc",  _float_attr("profitability_score"), _NEVER_MISSING),
+        "score_cost":    ("contracts.col.score_cost",           "asc",  _float_attr("cost_structure_score"), _NEVER_MISSING),
+        "score_eff":     ("contracts.col.score_efficiency",     "asc",  _float_attr("efficiency_score"), _NEVER_MISSING),
+        "score_stab":    ("contracts.col.score_stability",      "asc",  _float_attr("stability_score"), _NEVER_MISSING),
+        "score_overall": ("contracts.col.score_overall",        "asc",  _float_attr("overall_score"), _NEVER_MISSING),
     },
     TAB_PROFITABILITY: {
-        "contract": "asc",
-        "unrent_mom": "desc", "unrent_6m": "desc",
-        "top_cost_cat": "asc", "trend_mom": "asc",
+        "contract":     ("portfolio.col_contract",                 "asc",  _contract_sort, _NEVER_MISSING),
+        "unrent_mom":   ("contracts.col.unrent_mom",               "desc", _float_attr("unrent_mom_delta_eur"), _missing_attr("unrent_mom_delta_eur")),
+        "unrent_6m":    ("contracts.col.unrent_6m",                "desc", _float_attr("unrent_6m_delta_eur"),  _missing_attr("unrent_6m_delta_eur")),
+        "top_cost_cat": ("contracts.col.top_cost_increase_cat",    "asc",  _str_attr("top_cost_increase_cat"), _missing_attr("top_cost_increase_cat")),
+        "trend_mom":    ("contracts.col.trend_mom",                "asc",
+                         lambda m: float(m.base.cm_mom_eur or 0.0),
+                         lambda m: m.base.cm_mom_eur is None),
+    },
+    TAB_REVENUE: {
+        "contract":           ("portfolio.col_contract",                "asc",  _contract_sort, _NEVER_MISSING),
+        "revenue_mom":        ("contracts.col.revenue_mom",             "asc",  _float_attr("revenue_mom_delta_eur"), _missing_attr("revenue_mom_delta_eur")),
+        "revenue_6m":         ("contracts.col.revenue_6m",              "asc",  _float_attr("revenue_6m_delta_eur"),  _missing_attr("revenue_6m_delta_eur")),
+        "top_decline_stream": ("contracts.col.top_decline_stream",      "asc",  _float_attr("top_revenue_decline_eur"), _missing_attr("top_revenue_decline_cat")),
+        "revenue_trend":      ("contracts.col.revenue_trend",           "asc",
+                               lambda m: {"down": 0, "flat": 1, "up": 2, "no_data": 3}.get(m.revenue_trend_dir, 3),
+                               lambda m: m.revenue_trend_dir == "no_data"),
     },
     TAB_COST: {
-        "contract": "asc",
-        "top_cost_cat_now": "desc",
-        "top_cost_increase": "asc",
-        "top_cost_increase_pct": "desc",
-        "total_cost_pct": "desc",
+        "contract":              ("portfolio.col_contract",                    "asc",  _contract_sort, _NEVER_MISSING),
+        "top_cost_cat_now":      ("contracts.col.top_cost_cat",                "desc", _float_attr("top_cost_category_now_eur"), _missing_attr("top_cost_category_now")),
+        "top_cost_increase":     ("contracts.col.cost_highest_increase",      "asc",  _str_attr("top_cost_increase_cat"), _missing_attr("top_cost_increase_cat")),
+        "top_cost_increase_pct": ("contracts.col.cost_highest_increase_pct",  "desc", _float_attr("top_cost_increase_pct"), _missing_attr("top_cost_increase_pct")),
+        "total_cost_pct":        ("contracts.col.total_cost_increase_pct",    "desc", _float_attr("total_cost_increase_pct"), _missing_attr("total_cost_increase_pct")),
     },
     TAB_EFFICIENCY: {
-        "contract": "asc",
-        "hours_diff": "desc", "ratio_mom": "asc", "ratio_6m": "asc",
-        "hour_variance": "desc",
+        "contract":      ("portfolio.col_contract",              "asc",  _contract_sort, _NEVER_MISSING),
+        "hours_diff":    ("contracts.col.hours_plan_minus_prod", "desc", _float_attr("hours_planned_minus_productive"), _missing_attr("hours_planned_minus_productive")),
+        "ratio_mom":     ("contracts.col.ratio_mom",             "asc",  _float_attr("ratio_mom_delta_pp"), _missing_attr("ratio_mom_delta_pp")),
+        "ratio_6m":      ("contracts.col.ratio_6m",              "asc",  _float_attr("ratio_6m_delta_pp"), _missing_attr("ratio_6m_delta_pp")),
+        "hour_variance": ("contracts.col.hour_variance",         "desc", lambda m: abs(float(m.hour_variance or 0.0)), _missing_attr("hour_variance")),
     },
     TAB_STABILITY: {
-        "contract": "asc",
-        "duration": "asc", "cm_variance": "desc", "long_short": "asc",
-        "revenue_variance": "desc",
+        "contract":         ("portfolio.col_contract",          "asc",  _contract_sort, _NEVER_MISSING),
+        "duration":         ("contracts.col.duration",          "asc",  lambda m: int(m.contract_duration_months or 0), _missing_attr("contract_duration_months")),
+        "cm_variance":      ("contracts.col.cm_variance",       "desc", _float_attr("cm_variance"), _missing_attr("cm_variance")),
+        "long_short":       ("contracts.col.long_short",        "asc",  lambda m: 0 if not m.is_long_term else 1, _NEVER_MISSING),
+        "revenue_variance": ("contracts.col.revenue_variance",  "desc", _float_attr("revenue_variance"), _missing_attr("revenue_variance")),
     },
 }
 
-_HEADER_KEYS_BY_TAB: dict[str, list[tuple[str, str]]] = {
-    TAB_OVERALL: [
-        ("contract",      "portfolio.col_contract"),
-        ("score_prof",    "contracts.col.score_profitability"),
-        ("score_cost",    "contracts.col.score_cost"),
-        ("score_eff",     "contracts.col.score_efficiency"),
-        ("score_stab",    "contracts.col.score_stability"),
-        ("score_overall", "contracts.col.score_overall"),
-    ],
-    TAB_PROFITABILITY: [
-        ("contract",     "portfolio.col_contract"),
-        ("unrent_mom",   "contracts.col.unrent_mom"),
-        ("unrent_6m",    "contracts.col.unrent_6m"),
-        ("top_cost_cat", "contracts.col.top_cost_increase_cat"),
-        ("trend_mom",    "contracts.col.trend_mom"),
-    ],
-    TAB_COST: [
-        ("contract",              "portfolio.col_contract"),
-        ("top_cost_cat_now",      "contracts.col.top_cost_cat"),
-        ("top_cost_increase",     "contracts.col.cost_highest_increase"),
-        ("top_cost_increase_pct", "contracts.col.cost_highest_increase_pct"),
-        ("total_cost_pct",        "contracts.col.total_cost_increase_pct"),
-    ],
-    TAB_EFFICIENCY: [
-        ("contract",       "portfolio.col_contract"),
-        ("hours_diff",     "contracts.col.hours_plan_minus_prod"),
-        ("ratio_mom",      "contracts.col.ratio_mom"),
-        ("ratio_6m",       "contracts.col.ratio_6m"),
-        ("hour_variance",  "contracts.col.hour_variance"),
-    ],
-    TAB_STABILITY: [
-        ("contract",          "portfolio.col_contract"),
-        ("duration",          "contracts.col.duration"),
-        ("cm_variance",       "contracts.col.cm_variance"),
-        ("long_short",        "contracts.col.long_short"),
-        ("revenue_variance",  "contracts.col.revenue_variance"),
-    ],
-}
+
+def _default_sort_for_tab(tab: str) -> tuple[str, str]:
+    defaults = {
+        TAB_OVERALL:       ("score_overall",   "asc"),
+        TAB_PROFITABILITY: ("unrent_mom",      "desc"),
+        TAB_REVENUE:       ("revenue_mom",     "asc"),
+        TAB_COST:          ("total_cost_pct",  "desc"),
+        TAB_EFFICIENCY:    ("hour_variance",   "desc"),
+        TAB_STABILITY:     ("duration",        "asc"),
+    }
+    return defaults.get(tab, ("contract", "asc"))
 
 
-def _nan_to_none(v):
-    try:
-        if v is None or pd.isna(v):
-            return None
-    except (TypeError, ValueError):
-        return v
-    return v
+# ---------------------------------------------------------------------------
+# Tab + sort URL param handling
+# ---------------------------------------------------------------------------
+
+def _get_active_tab() -> str:
+    tab = st.session_state.get("portfolio_tab", TAB_PROFITABILITY)
+    return tab if tab in _TAB_SLUGS else TAB_PROFITABILITY
 
 
-def _sort_missing(m: ContractMetrics, tab: str, col: str) -> bool:
-    """True if this row has no meaningful value for `col` — always sort last."""
-    if col == "contract":
-        return False
-    if tab == TAB_OVERALL:
-        return False  # scores always have a numeric default
-    if tab == TAB_PROFITABILITY:
-        if col == "unrent_mom":   return m.unrent_mom_delta_eur is None
-        if col == "unrent_6m":    return m.unrent_6m_delta_eur is None
-        if col == "top_cost_cat": return m.top_cost_increase_cat_mom is None
-        if col == "trend_mom":    return m.cm_mom_pct is None
-    if tab == TAB_COST:
-        if col == "top_cost_cat_now":      return m.top_cost_category_now is None
-        if col == "top_cost_increase":     return m.top_cost_increase_cat is None
-        if col == "top_cost_increase_pct": return m.top_cost_increase_pct is None
-        if col == "total_cost_pct":        return m.total_cost_increase_pct is None
-    if tab == TAB_EFFICIENCY:
-        if col == "hours_diff":    return m.hours_planned_minus_productive is None
-        if col == "ratio_mom":     return m.ratio_mom_delta_pp is None
-        if col == "ratio_6m":      return m.ratio_6m_delta_pp is None
-        if col == "hour_variance": return m.hour_variance is None
-    if tab == TAB_STABILITY:
-        if col == "duration":         return m.contract_duration_months is None
-        if col == "cm_variance":      return m.cm_variance is None
-        if col == "long_short":       return False
-        if col == "revenue_variance": return m.revenue_variance is None
-    return False
+def _sort_state_keys(tab: str) -> tuple[str, str]:
+    return f"portfolio_sort_col_{tab}", f"portfolio_sort_dir_{tab}"
 
 
-def _sort_value(m: ContractMetrics, tab: str, col: str):
-    if col == "contract":
-        return (m.base.cost_center_name or m.base.cost_center_id or "").lower()
-    if tab == TAB_OVERALL:
-        if col == "score_prof":    return float(m.profitability_score)
-        if col == "score_cost":    return float(m.cost_structure_score)
-        if col == "score_eff":     return float(m.efficiency_score)
-        if col == "score_stab":    return float(m.stability_score)
-        if col == "score_overall": return float(m.overall_score)
-    if tab == TAB_PROFITABILITY:
-        if col == "unrent_mom":   return float(m.unrent_mom_delta_eur or 0.0)
-        if col == "unrent_6m":    return float(m.unrent_6m_delta_eur or 0.0)
-        if col == "top_cost_cat": return (m.top_cost_increase_cat_mom or "").lower()
-        if col == "trend_mom":    return float(m.cm_mom_pct) if m.cm_mom_pct is not None else 0.0
-    if tab == TAB_COST:
-        if col == "top_cost_cat_now":      return float(m.top_cost_category_now_eur)
-        if col == "top_cost_increase":     return (m.top_cost_increase_cat or "").lower()
-        if col == "top_cost_increase_pct": return float(m.top_cost_increase_pct or 0.0)
-        if col == "total_cost_pct":        return float(m.total_cost_increase_pct or 0.0)
-    if tab == TAB_EFFICIENCY:
-        if col == "hours_diff":    return float(m.hours_planned_minus_productive or 0.0)
-        if col == "ratio_mom":     return float(m.ratio_mom_delta_pp or 0.0)
-        if col == "ratio_6m":      return float(m.ratio_6m_delta_pp or 0.0)
-        if col == "hour_variance": return abs(float(m.hour_variance or 0.0))
-    if tab == TAB_STABILITY:
-        if col == "duration":         return int(m.contract_duration_months or 0)
-        if col == "cm_variance":      return float(m.cm_variance or 0.0)
-        if col == "long_short":       return 0 if not m.is_long_term else 1  # short first
-        if col == "revenue_variance": return float(m.revenue_variance or 0.0)
-    return 0
+def _toggle_sort(tab: str, col: str) -> None:
+    col_key, dir_key = _sort_state_keys(tab)
+    if col == st.session_state.get(col_key):
+        current_dir = st.session_state.get(dir_key, "desc")
+        st.session_state[dir_key] = "asc" if current_dir == "desc" else "desc"
+        return
+    st.session_state[col_key] = col
+    st.session_state[dir_key] = _TAB_COLUMNS[tab][col][1]
 
+
+def _consume_tab_query_param() -> None:
+    qp = st.query_params
+    raw = qp.get("tab")
+    if not raw:
+        return
+    slug = str(raw)
+    if slug in _TAB_SLUGS:
+        st.session_state["portfolio_tab"] = slug
+    del qp["tab"]
+
+
+def _consume_sort_query_param() -> None:
+    qp = st.query_params
+    raw = qp.get("sort")
+    if not raw:
+        return
+    col = str(raw)
+    tab = _get_active_tab()
+    if col in _TAB_COLUMNS[tab]:
+        _toggle_sort(tab, col)
+    del qp["sort"]
+
+
+def _apply_sort(
+    metrics: list[ContractMetrics], tab: str,
+) -> tuple[list[ContractMetrics], str, str]:
+    col_key, dir_key = _sort_state_keys(tab)
+    default_col, default_dir = _default_sort_for_tab(tab)
+    col = st.session_state.get(col_key, default_col)
+    direction = st.session_state.get(dir_key, default_dir)
+    _header, _default_dir, sort_fn, missing_fn = _TAB_COLUMNS[tab][col]
+    missing = [m for m in metrics if missing_fn(m)]
+    present = [m for m in metrics if not missing_fn(m)]
+    present.sort(key=sort_fn, reverse=(direction == "desc"))
+    return present + missing, col, direction
+
+
+# ---------------------------------------------------------------------------
+# Hover tooltip CSS + shared HTML helpers
+# ---------------------------------------------------------------------------
 
 _HOVER_TOOLTIP_CSS = """
 <style>
@@ -524,191 +561,37 @@ _HOVER_TOOLTIP_CSS = """
 </style>
 """
 
+_CHEV_HTML = "<span class='wisag-driver-chev'>›</span>"
+
 
 def _row_cell(value: str, sub: str = "") -> str:
-    """One cell inside the 4-column contract row — title + optional muted sub."""
-    sub_html = (f"<p class='wisag-driver-sub'>{escape(sub)}</p>" if sub else "")
-    return (f"<div><p class='wisag-driver-title'>{escape(value)}</p>{sub_html}</div>")
+    sub_html = f"<p class='wisag-driver-sub'>{escape(sub)}</p>" if sub else ""
+    return f"<div><p class='wisag-driver-title'>{escape(value)}</p>{sub_html}</div>"
+
+
+def _colored_cell(label: str, cls: str) -> str:
+    return f"<div><p class='wisag-driver-title {cls}'>{escape(label)}</p></div>"
 
 
 def _signed_cell(label: str, value: float | None, *,
                  bad_when: str = "positive") -> str:
-    """Row cell whose title is colored by the badness of `value`.
-
-    `bad_when`:
-      - "positive": positive values are bad (red), negative good (green).
-      - "negative": negative values are bad (red), positive good (green).
-      - "nonzero":  any non-zero value is bad (red) — used for hour variance.
-    """
+    """bad_when: 'positive' (>0 is red), 'negative' (<0 is red), 'nonzero' (!=0 is red)."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return _row_cell(label)
     v = float(value)
     if bad_when == "negative":
         cls = ("wisag-driver-title--neg" if v < 0
-               else "wisag-driver-title--pos" if v > 0
-               else "")
+               else "wisag-driver-title--pos" if v > 0 else "")
     elif bad_when == "nonzero":
         cls = "wisag-driver-title--neg" if v != 0 else ""
-    else:  # "positive"
-        cls = ("wisag-driver-title--neg" if v > 0
-               else "wisag-driver-title--pos" if v < 0
-               else "")
-    return (
-        f"<div><p class='wisag-driver-title {cls}'>{escape(label)}</p></div>"
-    )
-
-
-def _get_active_tab() -> str:
-    tab = st.session_state.get("portfolio_tab", TAB_OVERALL)
-    return tab if tab in _TAB_SLUGS else TAB_OVERALL
-
-
-def _default_sort_for_tab(tab: str) -> tuple[str, str]:
-    """Return the (column, direction) used as the landing sort for a tab."""
-    defaults = {
-        TAB_OVERALL:       ("score_overall",   "asc"),
-        TAB_PROFITABILITY: ("unrent_mom",      "desc"),
-        TAB_COST:          ("total_cost_pct",  "desc"),
-        TAB_EFFICIENCY:    ("hour_variance",   "desc"),
-        TAB_STABILITY:     ("duration",        "asc"),
-    }
-    return defaults.get(tab, ("contract", "asc"))
-
-
-def _sort_state_keys(tab: str) -> tuple[str, str]:
-    return f"portfolio_sort_col_{tab}", f"portfolio_sort_dir_{tab}"
-
-
-def _consume_tab_query_param() -> None:
-    """Promote `?tab=<slug>` into `st.session_state`, then strip it from the URL."""
-    qp = st.query_params
-    raw = qp.get("tab")
-    if not raw:
-        return
-    slug = str(raw)
-    if slug in _TAB_SLUGS:
-        st.session_state["portfolio_tab"] = slug
-    del qp["tab"]
-
-
-def _consume_sort_query_param() -> None:
-    """Promote `?sort=<col>` into sort state for the active tab, toggling on re-click."""
-    qp = st.query_params
-    raw = qp.get("sort")
-    if not raw:
-        return
-    col = str(raw)
-    tab = _get_active_tab()
-    if col not in _SORT_COLS_BY_TAB[tab]:
-        del qp["sort"]
-        return
-    col_key, dir_key = _sort_state_keys(tab)
-    current_col = st.session_state.get(col_key)
-    if col == current_col:
-        current_dir = st.session_state.get(dir_key, "desc")
-        st.session_state[dir_key] = "asc" if current_dir == "desc" else "desc"
     else:
-        st.session_state[col_key] = col
-        st.session_state[dir_key] = _DEFAULT_SORT_DIR_BY_TAB[tab].get(col, "desc")
-    del qp["sort"]
+        cls = ("wisag-driver-title--neg" if v > 0
+               else "wisag-driver-title--pos" if v < 0 else "")
+    return _colored_cell(label, cls)
 
 
-def _apply_sort(
-    metrics: list[ContractMetrics], tab: str,
-) -> tuple[list[ContractMetrics], str, str]:
-    col_key, dir_key = _sort_state_keys(tab)
-    default_col, default_dir = _default_sort_for_tab(tab)
-    col = st.session_state.get(col_key, default_col)
-    direction = st.session_state.get(dir_key, default_dir)
-    missing = [m for m in metrics if _sort_missing(m, tab, col)]
-    present = [m for m in metrics if not _sort_missing(m, tab, col)]
-    present.sort(key=lambda m: _sort_value(m, tab, col),
-                 reverse=(direction == "desc"))
-    return present + missing, col, direction
-
-
-def _render_tab_bar(active_tab: str) -> None:
-    """Render the 5-tab bar as Streamlit buttons.
-
-    Clicking a tab writes to `st.session_state["portfolio_tab"]`. Because the
-    enclosing body is wrapped in `@st.fragment`, the mutation only reruns the
-    fragment — no full-page refresh.
-    """
-    cols = st.columns(len(_TAB_SLUGS), gap="small")
-    for col, slug in zip(cols, _TAB_SLUGS):
-        with col:
-            btn_type = "primary" if slug == active_tab else "secondary"
-            if st.button(
-                t(_TAB_LABEL_KEYS[slug]),
-                key=f"portfolio_tab_btn_{slug}",
-                type=btn_type,
-                use_container_width=True,
-            ):
-                st.session_state["portfolio_tab"] = slug
-
-
-def _render_header_row(tab: str, active_col: str, active_dir: str) -> None:
-    """Render sortable column headers as Streamlit buttons.
-
-    Clicking mirrors `_consume_sort_query_param`'s logic — re-clicking the
-    active column toggles direction; a different column jumps to its default
-    direction. Fragment rerun handles the redraw; no `st.rerun()` needed.
-    """
-    headers = _HEADER_KEYS_BY_TAB[tab]
-    cols = st.columns(len(headers), gap="small")
-    col_key, dir_key = _sort_state_keys(tab)
-    for ui_col, (col, label_key) in zip(cols, headers):
-        with ui_col:
-            arrow = ""
-            if col == active_col:
-                arrow = " ↓" if active_dir == "desc" else " ↑"
-            btn_type = "primary" if col == active_col else "secondary"
-            if st.button(
-                f"{t(label_key)}{arrow}",
-                key=f"portfolio_sort_btn_{tab}_{col}",
-                type=btn_type,
-                use_container_width=True,
-            ):
-                if col == st.session_state.get(col_key):
-                    current_dir = st.session_state.get(dir_key, "desc")
-                    st.session_state[dir_key] = (
-                        "asc" if current_dir == "desc" else "desc"
-                    )
-                else:
-                    st.session_state[col_key] = col
-                    st.session_state[dir_key] = (
-                        _DEFAULT_SORT_DIR_BY_TAB[tab].get(col, "desc")
-                    )
-
-
-# ---------------------------------------------------------------------------
-# Formatting + small rendering helpers
-# ---------------------------------------------------------------------------
-
-def _fmt_eur_signed(v) -> str:
-    if v is None or pd.isna(v):
-        return "—"
-    sign = "+" if v > 0 else ("−" if v < 0 else "")
-    return f"{sign}{abs(v):,.0f} €".replace(",", ".")
-
-
-def _fmt_pct_signed(v) -> str:
-    if v is None or pd.isna(v):
-        return "—"
-    return f"{v * 100:+.1f} %".replace(".", ",")
-
-
-def _fmt_pp_signed(v) -> str:
-    if v is None or pd.isna(v):
-        return "—"
-    return f"{v:+.1f} pp".replace(".", ",")
-
-
-def _fmt_hours(v) -> str:
-    if v is None or pd.isna(v):
-        return "—"
-    sign = "+" if v > 0 else ("−" if v < 0 else "")
-    return f"{sign}{abs(v):,.0f} h".replace(",", ".")
+def _fmt_or_nodata(v, formatter: Callable[[object], str]) -> str:
+    return formatter(v) if v is not None else t("contracts.no_data")
 
 
 def _score_band(score: float) -> str:
@@ -724,28 +607,8 @@ def _score_pill(score: float | None, *, overall: bool = False) -> str:
         return "<span class='wisag-score-pill wisag-score-pill--warn'>—</span>"
     band = _score_band(float(score))
     extra = " wisag-score-pill--overall" if overall else ""
-    return (
-        f"<span class='wisag-score-pill wisag-score-pill--{band}{extra}'>"
-        f"{int(round(float(score)))}</span>"
-    )
-
-
-def _trend_arrow_html(direction: str, delta_eur: float | None) -> str:
-    label = t(f"contracts.trend_{direction}")
-    if direction == "up":
-        arrow = "↑"
-        cls = "wisag-trend-arrow--up"
-    elif direction == "down":
-        arrow = "↓"
-        cls = "wisag-trend-arrow--down"
-    else:
-        arrow = "→"
-        cls = "wisag-trend-arrow--flat"
-    delta_txt = f" {_fmt_eur_signed(delta_eur)}" if delta_eur not in (None, 0) else ""
-    return (
-        f"<span class='wisag-trend-arrow {cls}'>"
-        f"{arrow} {escape(label)}{escape(delta_txt)}</span>"
-    )
+    return (f"<span class='wisag-score-pill wisag-score-pill--{band}{extra}'>"
+            f"{int(round(float(score)))}</span>")
 
 
 def _cost_cat_label(key: str | None) -> str:
@@ -755,8 +618,22 @@ def _cost_cat_label(key: str | None) -> str:
     return label if label != f"cost_cat.{key}" else key
 
 
+def _revenue_stream_label(key: str | None) -> str:
+    if not key:
+        return t("contracts.no_data")
+    label = t(f"revenue_stream.{key}")
+    return label if label != f"revenue_stream.{key}" else key
+
+
+_REVENUE_TREND_CLASS: dict[str, str] = {
+    "down": "wisag-driver-title--neg",
+    "up":   "wisag-driver-title--pos",
+    "flat": "",
+    "no_data": "",
+}
+
+
 def _contract_identity_cell(r: ContractRanking) -> str:
-    """The always-present first cell: contract name + id/customer/region subtitle."""
     bits = [str(r.cost_center_id)]
     if r.customer_name:
         bits.append(r.customer_name)
@@ -765,199 +642,151 @@ def _contract_identity_cell(r: ContractRanking) -> str:
     return _row_cell(r.cost_center_name or str(r.cost_center_id), " · ".join(bits))
 
 
-def _render_row_overall(m: ContractMetrics) -> str:
-    grid = _GRID_TEMPLATE_BY_TAB[TAB_OVERALL]
-    col_contract = _contract_identity_cell(m.base)
-    col_prof = f"<div>{_score_pill(m.profitability_score)}</div>"
-    col_cost = f"<div>{_score_pill(m.cost_structure_score)}</div>"
-    col_eff = f"<div>{_score_pill(m.efficiency_score)}</div>"
-    col_stab = f"<div>{_score_pill(m.stability_score)}</div>"
-    col_overall = f"<div>{_score_pill(m.overall_score, overall=True)}</div>"
-    chev = "<span class='wisag-driver-chev'>›</span>"
-    inner = (
-        f"<div class='wisag-driver-row' style='{grid};'>"
-        f"{col_contract}{col_prof}{col_cost}{col_eff}{col_stab}{col_overall}{chev}"
-        f"</div>"
-    )
-    return _wrap_row_link(inner, m.base)
+# ---------------------------------------------------------------------------
+# Per-tab row renderers
+# ---------------------------------------------------------------------------
+
+def _row_overall(m: ContractMetrics) -> list[str]:
+    return [
+        _contract_identity_cell(m.base),
+        f"<div>{_score_pill(m.profitability_score)}</div>",
+        f"<div>{_score_pill(m.cost_structure_score)}</div>",
+        f"<div>{_score_pill(m.efficiency_score)}</div>",
+        f"<div>{_score_pill(m.stability_score)}</div>",
+        f"<div>{_score_pill(m.overall_score, overall=True)}</div>",
+    ]
 
 
-def _render_row_profitability(m: ContractMetrics) -> str:
-    grid = _GRID_TEMPLATE_BY_TAB[TAB_PROFITABILITY]
-    col_contract = _contract_identity_cell(m.base)
-    # Unrentability increases are bad (red); decreases good (green).
-    col_mom = _signed_cell(
-        _fmt_eur_signed(m.unrent_mom_delta_eur)
-        if m.unrent_mom_delta_eur is not None else t("contracts.no_data"),
-        m.unrent_mom_delta_eur,
-        bad_when="positive",
-    )
-    col_6m = _signed_cell(
-        _fmt_eur_signed(m.unrent_6m_delta_eur)
-        if m.unrent_6m_delta_eur is not None else t("contracts.no_data"),
-        m.unrent_6m_delta_eur,
-        bad_when="positive",
-    )
-    col_cat = _row_cell(_cost_cat_label(m.top_cost_increase_cat_mom))
-    # Trend vs last month = MoM % change of actual contribution margin.
-    # Negative % (margin falling) is bad (red); positive good (green).
-    col_trend = _signed_cell(
-        _fmt_pct_signed(m.cm_mom_pct)
-        if m.cm_mom_pct is not None else t("contracts.no_data"),
-        m.cm_mom_pct,
-        bad_when="negative",
-    )
-    chev = "<span class='wisag-driver-chev'>›</span>"
-    inner = (
-        f"<div class='wisag-driver-row' style='{grid};'>"
-        f"{col_contract}{col_mom}{col_6m}{col_cat}{col_trend}{chev}"
-        f"</div>"
-    )
-    return _wrap_row_link(inner, m.base)
+def _row_profitability(m: ContractMetrics) -> list[str]:
+    # CM MoM is rendered in EUR rather than %: CM can flip sign and a
+    # percentage change across a sign flip (or near-zero baseline) is not a
+    # meaningful business number. EUR compares cleanly across contracts.
+    return [
+        _contract_identity_cell(m.base),
+        _signed_cell(_fmt_or_nodata(m.unrent_mom_delta_eur, _fmt_eur_signed),
+                     m.unrent_mom_delta_eur, bad_when="positive"),
+        _signed_cell(_fmt_or_nodata(m.unrent_6m_delta_eur, _fmt_eur_signed),
+                     m.unrent_6m_delta_eur, bad_when="positive"),
+        _row_cell(_cost_cat_label(m.top_cost_increase_cat)),
+        _signed_cell(_fmt_or_nodata(m.base.cm_mom_eur, _fmt_eur_signed),
+                     m.base.cm_mom_eur, bad_when="negative"),
+    ]
 
 
-def _render_row_cost(m: ContractMetrics) -> str:
-    grid = _GRID_TEMPLATE_BY_TAB[TAB_COST]
-    col_contract = _contract_identity_cell(m.base)
-    col_top_now = _row_cell(
-        _cost_cat_label(m.top_cost_category_now),
-        _fmt_eur_signed(m.top_cost_category_now_eur).lstrip("+"),
-    )
-    col_top_inc = _row_cell(
-        _cost_cat_label(m.top_cost_increase_cat),
-        _fmt_pct_signed(m.top_cost_increase_pct)
-        if m.top_cost_increase_pct is not None else t("contracts.no_data"),
-    )
-    # Cost increases are bad (red); decreases good (green).
-    col_inc_pct = _signed_cell(
-        _fmt_pct_signed(m.top_cost_increase_pct),
-        m.top_cost_increase_pct, bad_when="positive",
-    )
-    col_total_pct = _signed_cell(
-        _fmt_pct_signed(m.total_cost_increase_pct),
-        m.total_cost_increase_pct, bad_when="positive",
-    )
-    chev = "<span class='wisag-driver-chev'>›</span>"
-    inner = (
-        f"<div class='wisag-driver-row' style='{grid};'>"
-        f"{col_contract}{col_top_now}{col_top_inc}{col_inc_pct}{col_total_pct}{chev}"
-        f"</div>"
-    )
-    return _wrap_row_link(inner, m.base)
+def _row_revenue_trend(m: ContractMetrics) -> list[str]:
+    if m.top_revenue_decline_cat is None:
+        stream_cell = _row_cell(t("contracts.no_data"))
+    else:
+        stream_cell = _row_cell(
+            _revenue_stream_label(m.top_revenue_decline_cat),
+            _fmt_eur_signed(m.top_revenue_decline_eur),
+        )
+
+    trend_cls = _REVENUE_TREND_CLASS.get(m.revenue_trend_dir, "")
+    trend_label = t(f"contracts.col.revenue_trend.{m.revenue_trend_dir}")
+    if trend_label == f"contracts.col.revenue_trend.{m.revenue_trend_dir}":
+        # i18n fallback if an unexpected state slips through.
+        trend_label = t("contracts.no_data")
+    trend_cell = _colored_cell(trend_label, trend_cls)
+
+    return [
+        _contract_identity_cell(m.base),
+        _signed_cell(_fmt_or_nodata(m.revenue_mom_delta_eur, _fmt_eur_signed),
+                     m.revenue_mom_delta_eur, bad_when="negative"),
+        _signed_cell(_fmt_or_nodata(m.revenue_6m_delta_eur, _fmt_eur_signed),
+                     m.revenue_6m_delta_eur, bad_when="negative"),
+        stream_cell,
+        trend_cell,
+    ]
 
 
-def _render_row_efficiency(m: ContractMetrics) -> str:
-    grid = _GRID_TEMPLATE_BY_TAB[TAB_EFFICIENCY]
-    col_contract = _contract_identity_cell(m.base)
-    # Planned > productive (positive gap) means lost capacity → bad (red).
-    col_diff = _signed_cell(
-        _fmt_hours(m.hours_planned_minus_productive),
-        m.hours_planned_minus_productive, bad_when="positive",
-    )
-    # Ratio going down (productive falling vs planned) is bad (red).
-    col_mom = _signed_cell(
-        _fmt_pp_signed(m.ratio_mom_delta_pp),
-        m.ratio_mom_delta_pp, bad_when="negative",
-    )
-    col_6m = _signed_cell(
-        _fmt_pp_signed(m.ratio_6m_delta_pp),
-        m.ratio_6m_delta_pp, bad_when="negative",
-    )
-    # Any non-zero hour variance is undesirable.
-    col_var = _signed_cell(
-        _fmt_hours(m.hour_variance),
-        m.hour_variance, bad_when="nonzero",
-    )
-    chev = "<span class='wisag-driver-chev'>›</span>"
-    inner = (
-        f"<div class='wisag-driver-row' style='{grid};'>"
-        f"{col_contract}{col_diff}{col_mom}{col_6m}{col_var}{chev}"
-        f"</div>"
-    )
-    return _wrap_row_link(inner, m.base)
+def _row_cost(m: ContractMetrics) -> list[str]:
+    return [
+        _contract_identity_cell(m.base),
+        _row_cell(_cost_cat_label(m.top_cost_category_now),
+                  _fmt_eur_signed(m.top_cost_category_now_eur).lstrip("+")),
+        _row_cell(_cost_cat_label(m.top_cost_increase_cat),
+                  _fmt_or_nodata(m.top_cost_increase_pct, _fmt_pct_signed)),
+        _signed_cell(_fmt_pct_signed(m.top_cost_increase_pct),
+                     m.top_cost_increase_pct, bad_when="positive"),
+        _signed_cell(_fmt_pct_signed(m.total_cost_increase_pct),
+                     m.total_cost_increase_pct, bad_when="positive"),
+    ]
 
 
-def _render_row_stability(m: ContractMetrics) -> str:
-    grid = _GRID_TEMPLATE_BY_TAB[TAB_STABILITY]
-    col_contract = _contract_identity_cell(m.base)
+def _row_efficiency(m: ContractMetrics) -> list[str]:
+    return [
+        _contract_identity_cell(m.base),
+        _signed_cell(_fmt_hours(m.hours_planned_minus_productive),
+                     m.hours_planned_minus_productive, bad_when="positive"),
+        _signed_cell(_fmt_pp_signed(m.ratio_mom_delta_pp),
+                     m.ratio_mom_delta_pp, bad_when="negative"),
+        _signed_cell(_fmt_pp_signed(m.ratio_6m_delta_pp),
+                     m.ratio_6m_delta_pp, bad_when="negative"),
+        _signed_cell(_fmt_hours(m.hour_variance),
+                     m.hour_variance, bad_when="nonzero"),
+    ]
 
-    # Short-term duration is worse → red; long-term is green.
+
+def _row_stability(m: ContractMetrics) -> list[str]:
     dur = m.contract_duration_months
     dur_label = (t("contracts.duration_months", n=int(dur))
                  if dur is not None else t("contracts.no_data"))
     dur_cls = ("wisag-driver-title--pos" if m.is_long_term
                else "wisag-driver-title--neg")
-    col_duration = (
-        f"<div><p class='wisag-driver-title {dur_cls}'>"
-        f"{escape(dur_label)}</p></div>"
-    )
 
-    # Variance cells: color by the overall stability_score band.
     band = _score_band(m.stability_score) if m.stability_score is not None else "warn"
     var_cls = ("wisag-driver-title--pos" if band == "good"
                else "wisag-driver-title--neg" if band == "bad" else "")
+
     cm_var_label = (_fmt_eur_signed(m.cm_variance).lstrip("+")
                     if m.cm_variance is not None else t("contracts.no_data"))
     rev_var_label = (_fmt_eur_signed(m.revenue_variance).lstrip("+")
                      if m.revenue_variance is not None else t("contracts.no_data"))
-    col_cm_var = (f"<div><p class='wisag-driver-title {var_cls}'>"
-                  f"{escape(cm_var_label)}</p></div>")
-    col_rev_var = (f"<div><p class='wisag-driver-title {var_cls}'>"
-                   f"{escape(rev_var_label)}</p></div>")
 
     term_cls = "wisag-term-badge--long" if m.is_long_term else "wisag-term-badge--short"
     term_label = t("contracts.long_term") if m.is_long_term else t("contracts.short_term")
-    col_term = (
-        f"<div><span class='wisag-term-badge {term_cls}'>"
-        f"{escape(term_label)}</span></div>"
-    )
-    chev = "<span class='wisag-driver-chev'>›</span>"
-    inner = (
-        f"<div class='wisag-driver-row' style='{grid};'>"
-        f"{col_contract}{col_duration}{col_cm_var}{col_term}{col_rev_var}{chev}"
-        f"</div>"
-    )
-    return _wrap_row_link(inner, m.base)
+
+    return [
+        _contract_identity_cell(m.base),
+        _colored_cell(dur_label, dur_cls),
+        _colored_cell(cm_var_label, var_cls),
+        f"<div><span class='wisag-term-badge {term_cls}'>{escape(term_label)}</span></div>",
+        _colored_cell(rev_var_label, var_cls),
+    ]
 
 
-_ROW_RENDERERS = {
-    TAB_OVERALL:       _render_row_overall,
-    TAB_PROFITABILITY: _render_row_profitability,
-    TAB_COST:          _render_row_cost,
-    TAB_EFFICIENCY:    _render_row_efficiency,
-    TAB_STABILITY:     _render_row_stability,
+_ROW_CELLS_BY_TAB: dict[str, Callable[[ContractMetrics], list[str]]] = {
+    TAB_PROFITABILITY: _row_profitability,
+    TAB_REVENUE:       _row_revenue_trend,
+    TAB_COST:          _row_cost,
+    TAB_EFFICIENCY:    _row_efficiency,
+    TAB_STABILITY:     _row_stability,
 }
 
 
 def _wrap_row_link(inner_html: str, r: ContractRanking) -> str:
-    """Wrap a row's HTML in the existing click-to-detail link + tooltip envelope."""
     href = f"?cc_id={escape(str(r.cost_center_id))}"
     link = (f"<a class='wisag-driver-row-link' href='{href}' target='_self'>"
             f"{inner_html}</a>")
-    tooltip = _build_row_tooltip(r)
-    return f"<div class='wisag-portfolio-row-wrap'>{link}{tooltip}</div>"
+    return f"<div class='wisag-portfolio-row-wrap'>{link}{_build_row_tooltip(r)}</div>"
 
 
 def _build_row_tooltip(r: ContractRanking) -> str:
-    """Small hover panel with a 6-month contribution-margin € trend for this contract."""
+    """6-month CM sparkline hover panel for this contract."""
     title = escape(r.cost_center_name or str(r.cost_center_id))
     sub = escape(t("portfolio.tooltip_sub"))
 
     values = [float(v) for v in (r.sparkline_cm_eur or [])]
     periods = list(r.sparkline_periods or [])
     if len(values) >= 2 and len(values) == len(periods):
-        # Colour matches the Profitability "Trend vs last month" column:
-        # red when MoM CM change is negative, green when positive. Fall back
-        # to the 6-month endpoint comparison only when MoM is unknown.
-        if r.cm_mom_eur is not None:
-            declining = r.cm_mom_eur < 0
-        else:
-            declining = values[-1] < values[0]
+        # Match the Profitability "Trend vs last month" coloring: MoM-driven.
+        declining = (r.cm_mom_eur < 0 if r.cm_mom_eur is not None
+                     else values[-1] < values[0])
         trend = fov.linear_trend(values)
         chart_svg = area_chart(
             values, periods, declining=declining,
-            y_as_pct=False, value_fmt="eur",
-            trendline=trend,
+            y_as_pct=False, value_fmt="eur", trendline=trend,
         )
         body = f"<div style='width:100%;'>{chart_svg}</div>"
     else:
@@ -973,45 +802,87 @@ def _build_row_tooltip(r: ContractRanking) -> str:
     )
 
 
+def _render_row(m: ContractMetrics, tab: str) -> str:
+    grid = _GRID_TEMPLATE_BY_TAB[tab]
+    cells = "".join(_ROW_CELLS_BY_TAB[tab](m))
+    inner = (f"<div class='wisag-driver-row' style='{grid};'>"
+             f"{cells}{_CHEV_HTML}</div>")
+    return _wrap_row_link(inner, m.base)
+
+
+# ---------------------------------------------------------------------------
+# Tab bar + header row + table
+# ---------------------------------------------------------------------------
+
+def _render_tab_bar(active_tab: str) -> None:
+    cols = st.columns(len(_TAB_SLUGS), gap="small")
+    for col, slug in zip(cols, _TAB_SLUGS):
+        with col:
+            if st.button(
+                t(_TAB_LABEL_KEYS[slug]),
+                key=f"portfolio_tab_btn_{slug}",
+                type=("primary" if slug == active_tab else "secondary"),
+                use_container_width=True,
+            ):
+                st.session_state["portfolio_tab"] = slug
+                st.rerun(scope="fragment")
+
+
+def _render_header_row(tab: str, active_col: str, active_dir: str) -> None:
+    columns = _TAB_COLUMNS[tab]
+    cols = st.columns(len(columns), gap="small")
+    for ui_col, (col, (label_key, _d, _s, _m)) in zip(cols, columns.items()):
+        with ui_col:
+            arrow = (" ↓" if active_dir == "desc" else " ↑") if col == active_col else ""
+            if st.button(
+                f"{t(label_key)}{arrow}",
+                key=f"portfolio_sort_btn_{tab}_{col}",
+                type=("primary" if col == active_col else "secondary"),
+                use_container_width=True,
+            ):
+                _toggle_sort(tab, col)
+                st.rerun(scope="fragment")
+
+
 def _render_table(metrics: list[ContractMetrics]) -> None:
     active_tab = _get_active_tab()
 
-    _render_tab_bar(active_tab)
+    with st.container():
+        st.markdown(
+            "<div class='wisag-portfolio-card-marker'></div>"
+            f"<h3 class='wisag-section-title'>{escape(t('portfolio.header'))}</h3>",
+            unsafe_allow_html=True,
+        )
 
-    st.markdown(
-        "<div id='wisag-contracts-anchor'></div>",
-        unsafe_allow_html=True,
-    )
+        _render_tab_bar(active_tab)
 
-    if not metrics:
-        st.info(t("portfolio.empty_all_profitable"))
-        return
+        st.markdown("<div id='wisag-contracts-anchor'></div>", unsafe_allow_html=True)
 
-    ordered, active_col, active_dir = _apply_sort(metrics, active_tab)
+        if not metrics:
+            st.info(t("portfolio.empty_all_profitable"))
+            return
 
-    _render_header_row(active_tab, active_col, active_dir)
+        ordered, active_col, active_dir = _apply_sort(metrics, active_tab)
+        _render_header_row(active_tab, active_col, active_dir)
 
-    render_row = _ROW_RENDERERS[active_tab]
-    rows_html = ""
-    for m in ordered:
-        rows_html += render_row(m)
+        rows_html = "".join(_render_row(m, active_tab) for m in ordered)
+        st.markdown(rows_html, unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='wisag-section-hint'>{escape(t('portfolio.open_contract_hint'))}</div>",
+            unsafe_allow_html=True,
+        )
 
-    section_card(
-        title=t("portfolio.header"),
-        subtitle="",
-        rows_html=rows_html,
-        hint=t("portfolio.open_contract_hint"),
-    )
 
+# ---------------------------------------------------------------------------
+# Top-level entry point
+# ---------------------------------------------------------------------------
 
 def render(df: pd.DataFrame) -> None:
     """Render the Contracts multi-tab landing view."""
     if "portfolio_tab" not in st.session_state:
-        st.session_state["portfolio_tab"] = TAB_OVERALL
-    # Deep-link support only: first-paint honors `?tab=` / `?sort=` if the
-    # user arrived via a shared URL. Once consumed, the params are stripped,
-    # and all in-page tab/sort interactions go through session state inside
-    # the body fragment — no query-param round-trip, no full-page refresh.
+        st.session_state["portfolio_tab"] = TAB_PROFITABILITY
+    # Deep-link only: honor ?tab / ?sort on first paint, then strip so in-page
+    # interactions stay inside the fragment without a full-page refresh.
     _consume_tab_query_param()
     _consume_sort_query_param()
     st.markdown(_HOVER_TOOLTIP_CSS, unsafe_allow_html=True)

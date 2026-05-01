@@ -1,14 +1,11 @@
 """Schema contract tests for the WISAG dataset.
 
-These guard the two invariants the loader promises:
+Guards two invariants the loader promises:
+1. Every semantic name in HEADER_MAP has a dtype declaration in SCHEMA.
+2. Loading the bundled dataset produces a SchemaReport with ok=True.
 
-1. Every semantic name in HEADER_MAP has a dtype declaration in SCHEMA, and
-   the two stay in sync.
-2. Loading `data/Dataset_anoym.xlsx` produces a SchemaReport with `ok=True`
-   and the expected critical columns, derived columns, and dtypes.
-
-If any of these fail, the cached parquet at `data/.cache/` is invalid too -
-clear it with `src.data_cache.clear_cache()` before re-running.
+If either fails, the cached parquet at data/.cache/ is also invalid -
+clear it with src.data_cache.clear_cache() before re-running.
 """
 from __future__ import annotations
 
@@ -40,7 +37,7 @@ EXPECTED_DERIVED_COLS = frozenset({
     "cost_total_db2", "subcontractor_total", "subcontractor_share",
     "labor_cost_per_productive_hour", "labor_ratio", "quality_gap",
     "cm_vs_plan_delta", "cm_vs_plan_pct",
-    # from add_time_deltas (6 base cols x 3 suffixes = 18 derived)
+    # from add_time_deltas (6 base cols x 3 suffixes)
     "cm_db_mom", "cm_db_yoy", "cm_db_mom_pct",
     "cm_db_pct_mom", "cm_db_pct_yoy", "cm_db_pct_mom_pct",
     "cm_db1_mom", "cm_db1_yoy", "cm_db1_mom_pct",
@@ -56,9 +53,13 @@ EXPECTED_DERIVED_COLS = frozenset({
 })
 
 
-def _skip_if_no_dataset() -> None:
+@pytest.fixture(scope="module")
+def dataset_df() -> pd.DataFrame:
     if not DATASET.exists():
         pytest.skip(f"Dataset not present at {DATASET}")
+    df, report = load(str(DATASET))
+    assert report.ok, report
+    return df
 
 
 def test_schema_version_is_string() -> None:
@@ -66,7 +67,6 @@ def test_schema_version_is_string() -> None:
 
 
 def test_header_map_covers_schema() -> None:
-    """Every SCHEMA key must be a semantic value in HEADER_MAP and vice versa."""
     header_values = set(HEADER_MAP.values())
     schema_keys = set(SCHEMA.keys())
     assert header_values == schema_keys, {
@@ -81,7 +81,8 @@ def test_critical_columns_are_in_schema() -> None:
 
 
 def test_load_produces_ok_report() -> None:
-    _skip_if_no_dataset()
+    if not DATASET.exists():
+        pytest.skip(f"Dataset not present at {DATASET}")
     _, report = load(str(DATASET))
     assert report.strategy == "header"
     assert report.missing_critical == []
@@ -89,29 +90,28 @@ def test_load_produces_ok_report() -> None:
     assert report.ok is True
 
 
-def test_loader_applies_schema_dtypes() -> None:
-    _skip_if_no_dataset()
-    df, _ = load(str(DATASET))
-    # Spot-check one column per dtype family.
-    assert df["year"].dtype.name == "Int64"
-    assert df["revenue_total"].dtype.name == "float64"
-    assert str(df["cost_center_id"].dtype) == "category"
-    assert str(df["cost_center_name"].dtype) == "string"
-    assert df["contract_start"].dtype.name == "datetime64[ns]"
+@pytest.mark.parametrize("col,expected_dtype", [
+    ("year", "Int64"),
+    ("revenue_total", "float64"),
+    ("cost_center_id", "category"),
+    ("cost_center_name", "string"),
+    ("contract_start", "datetime64[ns]"),
+])
+def test_loader_applies_schema_dtypes(dataset_df: pd.DataFrame,
+                                      col: str, expected_dtype: str) -> None:
+    assert str(dataset_df[col].dtype) == expected_dtype
 
 
-def test_enrich_produces_expected_derived_columns() -> None:
-    _skip_if_no_dataset()
-    df, _ = load(str(DATASET))
-    out = enrich(df)
+def test_enrich_produces_expected_derived_columns(dataset_df: pd.DataFrame) -> None:
+    out = enrich(dataset_df)
     missing = EXPECTED_DERIVED_COLS - set(out.columns)
     assert not missing, f"enrich missed: {sorted(missing)}"
 
 
 def test_parquet_roundtrip_is_stable() -> None:
-    """Second call must come from cache and produce identical rows/columns."""
-    _skip_if_no_dataset()
-    clear_cache()  # start from a known cold state
+    if not DATASET.exists():
+        pytest.skip(f"Dataset not present at {DATASET}")
+    clear_cache()
     df_cold, report_cold = load_or_build_cache(str(DATASET))
     df_warm, report_warm = load_or_build_cache(str(DATASET))
 
@@ -121,7 +121,7 @@ def test_parquet_roundtrip_is_stable() -> None:
     assert report_warm.ok is True
     assert report_cold.strategy == report_warm.strategy
 
-    # Values must match, but parquet may round-trip categoricals as strings.
+    # Parquet may round-trip categoricals as strings; values must still match.
     pd.testing.assert_frame_equal(
         df_cold.reset_index(drop=True),
         df_warm.reset_index(drop=True),
@@ -131,12 +131,12 @@ def test_parquet_roundtrip_is_stable() -> None:
 
 
 def test_cache_key_changes_with_schema_version(monkeypatch: pytest.MonkeyPatch) -> None:
-    _skip_if_no_dataset()
+    if not DATASET.exists():
+        pytest.skip(f"Dataset not present at {DATASET}")
     from src import data_cache
 
     original = data_cache.SCHEMA_VERSION
     monkeypatch.setattr(data_cache, "SCHEMA_VERSION", original + "-test")
-
     key_a = data_cache._cache_key(DATASET)
     monkeypatch.setattr(data_cache, "SCHEMA_VERSION", original + "-other")
     key_b = data_cache._cache_key(DATASET)

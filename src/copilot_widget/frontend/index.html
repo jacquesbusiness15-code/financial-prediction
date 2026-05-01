@@ -1,0 +1,838 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>WISAG Copilot</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --bg-soft: #f3f4f6;
+    --fg: #111827;
+    --fg-muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #4f46e5;
+    --accent-soft: #eef2ff;
+    --user-bg: #eef2ff;
+    --user-fg: #1e1b4b;
+    --assistant-bg: #f5f6fa;
+    --assistant-fg: #111827;
+    --shadow: 0 18px 40px rgba(17, 24, 39, 0.16);
+    --shadow-pill: 0 8px 20px rgba(17, 24, 39, 0.10);
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+            "Helvetica Neue", Arial, sans-serif;
+
+    /* Dimensions: input pill fills the 400px iframe flush in the corner. */
+    --iframe-w: 400px;
+    --pill-w: 400px;
+    --pill-h: 38px;
+    --handle-w: 32px;
+    --handle-h: 6px;
+    --gap-handle-transcript: 12px;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: transparent;
+    font-family: var(--font);
+    color: var(--fg);
+    overflow: hidden;
+  }
+  * { box-sizing: border-box; }
+
+  /* Positioning host. Each container floats independently inside it. */
+  .dock {
+    position: absolute;
+    inset: 0;
+  }
+
+  /* --- Input pill (always visible, the visual anchor) ------------------ */
+  .input-pill {
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: var(--pill-w);
+    height: var(--pill-h);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    box-shadow: var(--shadow-pill);
+    display: flex;
+    align-items: center;
+    padding: 4px 4px 4px 8px;
+    gap: 4px;
+  }
+
+  .gray-field {
+    flex: 1 1 auto;
+    height: 28px;
+    min-width: 0;
+    background: var(--bg-soft);
+    border-radius: 999px;
+    padding: 0 10px;
+    display: flex;
+    align-items: center;
+  }
+  textarea.input {
+    flex: 1 1 auto;
+    width: 100%;
+    border: none;
+    outline: none;
+    resize: none;
+    background: transparent;
+    font: inherit;
+    font-size: 12px;
+    color: var(--fg);
+    padding: 0;
+    line-height: 1.4;
+    height: 18px;
+    overflow: hidden;
+  }
+  textarea.input::placeholder { color: var(--fg-muted); }
+
+  /* Centered icon: padding:0 + line-height:0 + svg display:block kill the
+     hidden inline baseline that would otherwise nudge the icon down. */
+  button.action {
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    border: none;
+    border-radius: 50%;
+    padding: 0;
+    line-height: 0;
+    background: var(--accent-soft);
+    color: var(--accent);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 120ms ease, color 120ms ease, transform 80ms ease;
+  }
+  button.action:hover { background: var(--accent); color: #ffffff; }
+  button.action:active { transform: scale(0.94); }
+  button.action:disabled {
+    background: #e5e7eb;
+    color: #9ca3af;
+    cursor: not-allowed;
+  }
+  button.action svg {
+    display: block;
+    width: 16px;
+    height: 16px;
+  }
+
+  /* Black mic mode with the white waveform. */
+  button.action.action-mic {
+    background: #0b1220;
+    color: #ffffff;
+  }
+  button.action.action-mic:hover { background: #1f2937; color: #ffffff; }
+
+  /* Recording state - pulsing red to make it obvious. */
+  button.action.action-mic.is-recording {
+    background: #dc2626;
+    color: #ffffff;
+    animation: rec-pulse 1.2s infinite ease-in-out;
+  }
+  button.action.action-mic.is-recording:hover { background: #b91c1c; }
+  @keyframes rec-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.55); }
+    50%      { box-shadow: 0 0 0 6px rgba(220, 38, 38, 0); }
+  }
+
+  /* --- Drag handle (small pill, touches the input pill's top edge) ----- */
+  .handle {
+    position: absolute;
+    bottom: var(--pill-h);
+    right: calc((var(--pill-w) - var(--handle-w)) / 2);
+    width: var(--handle-w);
+    height: var(--handle-h);
+    border-radius: 999px;
+    background: #d1d5db;
+    cursor: row-resize;
+    touch-action: none;
+    transition: background 120ms ease, width 120ms ease;
+  }
+  .handle:hover {
+    background: #9ca3af;
+    width: 40px;
+    right: calc((var(--pill-w) - 40px) / 2);
+  }
+
+  /* --- Transcript panel (only when expanded) --------------------------- */
+  .transcript {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(var(--pill-h) + var(--handle-h) + var(--gap-handle-transcript));
+    height: min(calc(100vh - 120px), 3600px);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 22px;
+    box-shadow: var(--shadow);
+    padding: 0;
+    display: none;
+    flex-direction: column;
+  }
+  .dock.is-expanded .transcript { display: flex; }
+
+  .transcript-header {
+    flex: 0 0 auto;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    padding: 8px 10px 6px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    border-top-left-radius: 22px;
+    border-top-right-radius: 22px;
+  }
+  .transcript-body {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  /* TTS button reuses .action; smaller footprint and a neutral look. */
+  button.action.action-tts {
+    width: 26px;
+    height: 26px;
+  }
+  button.action.action-tts svg {
+    width: 14px;
+    height: 14px;
+  }
+  button.action.action-tts.is-speaking {
+    background: var(--accent);
+    color: #ffffff;
+  }
+
+  .msg {
+    max-width: 92%;
+    padding: 8px 12px;
+    border-radius: 12px;
+    font-size: 12.5px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  .msg.user {
+    align-self: flex-end;
+    background: var(--user-bg);
+    color: var(--user-fg);
+    border-bottom-right-radius: 4px;
+  }
+  .msg.assistant {
+    align-self: flex-start;
+    background: var(--assistant-bg);
+    color: var(--assistant-fg);
+    border-bottom-left-radius: 4px;
+  }
+  .msg.greeting {
+    align-self: center;
+    max-width: 100%;
+    background: transparent;
+    color: var(--fg-muted);
+    font-size: 12px;
+    text-align: center;
+  }
+  .msg h3 {
+    margin: 6px 0 4px 0;
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  .msg strong { font-weight: 600; }
+  .msg ul { padding-left: 18px; margin: 4px 0; }
+  .msg li { margin-bottom: 2px; }
+  .msg code {
+    background: rgba(17, 24, 39, 0.06);
+    border-radius: 4px;
+    padding: 1px 4px;
+    font-size: 11.5px;
+  }
+
+  .thinking {
+    align-self: flex-start;
+    font-size: 12px;
+    color: var(--fg-muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+  }
+  .thinking .dot {
+    width: 4px; height: 4px;
+    border-radius: 999px;
+    background: var(--fg-muted);
+    animation: pulse 1.2s infinite ease-in-out;
+  }
+  .thinking .dot:nth-child(2) { animation-delay: 0.15s; }
+  .thinking .dot:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes pulse {
+    0%, 80%, 100% { opacity: 0.3; transform: scale(0.9); }
+    40% { opacity: 1; transform: scale(1.2); }
+  }
+</style>
+</head>
+<body>
+<div id="dock" class="dock">
+
+  <div id="transcript" class="transcript">
+    <div class="transcript-header">
+      <button id="ttsBtn" class="action action-tts" type="button" aria-label="" disabled>
+        <svg id="iconSpeak" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+          <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+          <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+        </svg>
+        <svg id="iconStop" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round" style="display:none">
+          <rect x="6" y="6" width="12" height="12" rx="1"/>
+        </svg>
+      </button>
+    </div>
+    <div id="transcriptBody" class="transcript-body"></div>
+  </div>
+
+  <div id="handle" class="handle"></div>
+
+  <div id="inputPill" class="input-pill">
+    <div class="gray-field">
+      <textarea id="input" class="input" rows="1" placeholder=""></textarea>
+    </div>
+    <button id="actionBtn" class="action" type="button" aria-label="Send">
+      <svg id="iconMic" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2.2" stroke-linecap="round"
+           stroke-linejoin="round" style="display:none">
+        <line x1="3"  y1="11" x2="3"  y2="13"/>
+        <line x1="8"  y1="8"  x2="8"  y2="16"/>
+        <line x1="12" y1="4"  x2="12" y2="20"/>
+        <line x1="16" y1="8"  x2="16" y2="16"/>
+        <line x1="21" y1="11" x2="21" y2="13"/>
+      </svg>
+      <svg id="iconSend" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round"
+           stroke-linejoin="round" style="display:none">
+        <line x1="22" y1="2" x2="11" y2="13"/>
+        <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+      </svg>
+    </button>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // Visual tokens duplicated from CSS so the JS can reason about geometry.
+  const PILL_H = 38;
+  const HANDLE_H = 6;
+  const GAP = 12;
+  const TRANSCRIPT_H_CSS = "min(calc(100vh - 120px), 3600px)";
+
+  const $ = (id) => document.getElementById(id);
+  const dock = $("dock");
+  const handle = $("handle");
+  const transcript = $("transcript");
+  const transcriptBody = $("transcriptBody");
+  const input = $("input");
+  const actionBtn = $("actionBtn");
+  const iconMic = $("iconMic");
+  const iconSend = $("iconSend");
+  const inputPill = $("inputPill");
+  const ttsBtn = $("ttsBtn");
+  const iconSpeak = $("iconSpeak");
+  const iconStop = $("iconStop");
+
+  const ttsSupported = typeof window.speechSynthesis !== "undefined"
+    && typeof window.SpeechSynthesisUtterance !== "undefined";
+
+  const state = {
+    messages: [],
+    expanded: false,
+    busy: false,
+    placeholder: "",
+    micHint: "",
+    emptyGreeting: "",
+    thinkingLabel: "",
+    sendLabel: "Send",
+    micLabel: "Dictate",
+    readAloudLabel: "Read aloud",
+    stopReadingLabel: "Stop reading",
+    lang: "de",
+    speaking: false,
+    nonce: 0,
+    recording: false,
+  };
+
+  // --- Microphone capture (MediaRecorder -> base64 -> Streamlit) ----------
+  const mediaSupported = !!(navigator.mediaDevices
+    && navigator.mediaDevices.getUserMedia
+    && typeof window.MediaRecorder !== "undefined");
+  let mediaRecorder = null;
+  let mediaStream = null;
+  let mediaChunks = [];
+  let mediaMime = "audio/webm";
+
+  function pickMime() {
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/ogg;codecs=opus",
+      "audio/mp4",
+    ];
+    for (const m of candidates) {
+      if (window.MediaRecorder
+          && typeof MediaRecorder.isTypeSupported === "function"
+          && MediaRecorder.isTypeSupported(m)) {
+        return m;
+      }
+    }
+    return "";
+  }
+
+  function setRecordingVisual(rec) {
+    state.recording = !!rec;
+    actionBtn.classList.toggle("is-recording", state.recording);
+    const label = state.recording ? state.stopReadingLabel : state.micLabel;
+    actionBtn.title = state.recording ? state.stopReadingLabel : state.micHint;
+    actionBtn.setAttribute("aria-label", label);
+  }
+
+  function blobToBase64(blob) {
+    return new Promise(function (resolve, reject) {
+      const reader = new FileReader();
+      reader.onerror = function () { reject(reader.error); };
+      reader.onload = function () {
+        const result = reader.result || "";
+        const comma = String(result).indexOf(",");
+        resolve(comma >= 0 ? String(result).slice(comma + 1) : String(result));
+      };
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  function stopMediaTracks() {
+    if (mediaStream) {
+      try { mediaStream.getTracks().forEach(function (tr) { tr.stop(); }); }
+      catch (_) {}
+    }
+    mediaStream = null;
+    mediaRecorder = null;
+  }
+
+  async function startRecording() {
+    if (!mediaSupported) {
+      window.alert(state.micHint
+        || "Microphone not supported in this browser.");
+      return;
+    }
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      var name = (err && err.name) || "";
+      var msg = (err && err.message) || String(err);
+      if (name === "NotAllowedError" || name === "SecurityError") {
+        window.alert("Microphone blocked. Allow microphone access for "
+          + "this site in your browser, then reload.");
+      } else if (name === "NotFoundError" || name === "OverconstrainedError") {
+        window.alert("No microphone found on this device.");
+      } else {
+        window.alert("Microphone error: " + name + " " + msg);
+      }
+      return;
+    }
+    const mime = pickMime();
+    mediaMime = mime || "audio/webm";
+    try {
+      mediaRecorder = mime
+        ? new MediaRecorder(mediaStream, { mimeType: mime })
+        : new MediaRecorder(mediaStream);
+    } catch (_) {
+      stopMediaTracks();
+      window.alert("Could not start recorder.");
+      return;
+    }
+    mediaChunks = [];
+    mediaRecorder.ondataavailable = function (ev) {
+      if (ev.data && ev.data.size > 0) mediaChunks.push(ev.data);
+    };
+    mediaRecorder.onstop = async function () {
+      const type = (mediaRecorder && mediaRecorder.mimeType) || mediaMime;
+      const blob = new Blob(mediaChunks, { type: type });
+      stopMediaTracks();
+      setRecordingVisual(false);
+      if (!blob.size) return;
+      try {
+        const b64 = await blobToBase64(blob);
+        state.nonce += 1;
+        sendToStreamlit({
+          type: "audio",
+          mime: type,
+          data: b64,
+          nonce: state.nonce,
+        });
+      } catch (_) { /* swallow */ }
+    };
+    mediaRecorder.start();
+    setRecordingVisual(true);
+  }
+
+  function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+      try { mediaRecorder.stop(); } catch (_) { stopMediaTracks(); setRecordingVisual(false); }
+    } else {
+      stopMediaTracks();
+      setRecordingVisual(false);
+    }
+  }
+
+  function toggleRecording() {
+    if (state.recording) stopRecording(); else startRecording();
+  }
+
+  // --- Layout sizing ----------------------------------------------------
+  function transcriptHeightPx() {
+    // Mirror the CSS `min(calc(100vh - 120px), 720px)` so we can budget iframe height.
+    // The 120px subtrahend leaves room for the pill (38) + handle (6) + gap (12),
+    // the 18px bottom offset, and a top breathing margin so the widget never
+    // clips off the top of the viewport.
+    const vh = window.innerHeight || 800;
+    return Math.min(Math.max(vh - 120, 160), 3600);
+  }
+  function dockHeightCollapsed() {
+    return PILL_H + HANDLE_H + 4; // 4px breathing room above the handle
+  }
+  function dockHeightExpanded() {
+    return PILL_H + HANDLE_H + GAP + transcriptHeightPx() + 4;
+  }
+  function setExpandedVisual(expanded) {
+    dock.classList.toggle("is-expanded", expanded);
+    if (!expanded && state.speaking) stopSpeak();
+    resizeIframe();
+  }
+
+  // --- Markdown-ish renderer (safe; escapes HTML) ----------------------
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+  }
+  function inline(s) {
+    return escapeHtml(s)
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/`([^`]+)`/g, "<code>$1</code>");
+  }
+  function renderAssistant(text) {
+    const lines = String(text).split(/\r?\n/);
+    let html = "";
+    let inList = false;
+    const flush = () => { if (inList) { html += "</ul>"; inList = false; } };
+    for (const raw of lines) {
+      const line = raw.trimEnd();
+      if (/^###\s+/.test(line)) {
+        flush();
+        html += "<h3>" + inline(line.replace(/^###\s+/, "")) + "</h3>";
+      } else if (/^\s*[-*]\s+/.test(line)) {
+        if (!inList) { html += "<ul>"; inList = true; }
+        html += "<li>" + inline(line.replace(/^\s*[-*]\s+/, "")) + "</li>";
+      } else if (line === "") {
+        flush();
+        html += "<br/>";
+      } else {
+        flush();
+        html += inline(line) + "<br/>";
+      }
+    }
+    flush();
+    return html;
+  }
+
+  function appendMsg(role, content) {
+    const div = document.createElement("div");
+    div.className = "msg " + role;
+    if (role === "assistant") {
+      div.innerHTML = renderAssistant(content || "");
+    } else {
+      div.textContent = content || "";
+    }
+    transcriptBody.appendChild(div);
+  }
+  function renderTranscript() {
+    transcriptBody.innerHTML = "";
+    if (!state.messages || state.messages.length === 0) {
+      const greet = document.createElement("div");
+      greet.className = "msg greeting";
+      greet.textContent = state.emptyGreeting;
+      transcriptBody.appendChild(greet);
+    } else {
+      for (const m of state.messages) {
+        appendMsg(m.role === "user" ? "user" : "assistant", m.content);
+      }
+    }
+    if (state.busy) {
+      const t = document.createElement("div");
+      t.className = "thinking";
+      t.innerHTML = "<span>" + escapeHtml(state.thinkingLabel)
+                  + "</span><span class='dot'></span>"
+                  + "<span class='dot'></span><span class='dot'></span>";
+      transcriptBody.appendChild(t);
+    }
+    transcriptBody.scrollTop = transcriptBody.scrollHeight;
+    updateTtsButton();
+  }
+
+  function updateActionIcon() {
+    const hasText = input.value.trim().length > 0;
+    iconMic.style.display = hasText ? "none" : "block";
+    iconSend.style.display = hasText ? "block" : "none";
+    actionBtn.classList.toggle("action-mic", !hasText);
+    actionBtn.setAttribute(
+      "aria-label",
+      hasText ? state.sendLabel : state.micLabel,
+    );
+    actionBtn.title = hasText ? state.sendLabel : state.micHint;
+    actionBtn.disabled = state.busy && hasText;
+  }
+
+  // --- Text-to-speech --------------------------------------------------
+  function stripMarkdown(text) {
+    return String(text || "")
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/^\s*#{1,6}\s+/gm, "")
+      .replace(/^\s*[-*]\s+/gm, "")
+      .replace(/\s+\n/g, "\n")
+      .trim();
+  }
+  function latestAssistantText() {
+    if (!state.messages) return "";
+    for (let i = state.messages.length - 1; i >= 0; i -= 1) {
+      const m = state.messages[i];
+      if (m && m.role === "assistant" && m.content) return m.content;
+    }
+    return "";
+  }
+  function ttsLang() {
+    return state.lang === "en" ? "en-US" : "de-DE";
+  }
+  function setSpeakingVisual(speaking) {
+    state.speaking = !!speaking;
+    iconSpeak.style.display = speaking ? "none" : "block";
+    iconStop.style.display = speaking ? "block" : "none";
+    ttsBtn.classList.toggle("is-speaking", !!speaking);
+    const label = speaking ? state.stopReadingLabel : state.readAloudLabel;
+    ttsBtn.setAttribute("aria-label", label);
+    ttsBtn.title = label;
+  }
+  function stopSpeak() {
+    if (!ttsSupported) return;
+    try { window.speechSynthesis.cancel(); } catch (_) {}
+    setSpeakingVisual(false);
+  }
+  function startSpeak() {
+    if (!ttsSupported) return;
+    const raw = latestAssistantText();
+    const text = stripMarkdown(raw);
+    if (!text) return;
+    try { window.speechSynthesis.cancel(); } catch (_) {}
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = ttsLang();
+    utter.onend = () => setSpeakingVisual(false);
+    utter.onerror = () => setSpeakingVisual(false);
+    setSpeakingVisual(true);
+    try {
+      window.speechSynthesis.speak(utter);
+    } catch (_) {
+      setSpeakingVisual(false);
+    }
+  }
+  function onTtsClick() {
+    if (ttsBtn.disabled) return;
+    if (state.speaking) stopSpeak(); else startSpeak();
+  }
+  function updateTtsButton() {
+    const hasReply = !!latestAssistantText();
+    const enabled = ttsSupported && hasReply;
+    ttsBtn.disabled = !enabled;
+    if (!enabled && state.speaking) stopSpeak();
+    if (!state.speaking) {
+      ttsBtn.setAttribute("aria-label", state.readAloudLabel);
+      ttsBtn.title = state.readAloudLabel;
+    }
+  }
+
+  // --- Send + state events --------------------------------------------
+  function sendText() {
+    const text = input.value.trim();
+    if (!text || state.busy) return;
+    state.nonce += 1;
+    input.value = "";
+    updateActionIcon();
+    sendToStreamlit({ type: "send", text: text, nonce: state.nonce });
+  }
+  function sendStateEvent(expanded) {
+    state.nonce += 1;
+    sendToStreamlit({ type: "state", expanded: expanded, nonce: state.nonce });
+  }
+
+  function onActionClick() {
+    if (input.value.trim().length > 0) {
+      sendText();
+    } else {
+      toggleRecording();
+    }
+  }
+  function onKeyDown(e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendText();
+    }
+  }
+
+  // --- Drag gesture (handle → tap toggles, drag snaps) -----------------
+  let dragActive = false;
+  let dragStartY = 0;
+  let dragMoved = false;
+  let dragTargetExpanded = false;
+
+  function onPointerDown(e) {
+    dragActive = true;
+    dragMoved = false;
+    dragStartY = e.clientY;
+    dragTargetExpanded = state.expanded;
+    try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+    inflateIframeForDrag();
+  }
+  function onPointerMove(e) {
+    if (!dragActive) return;
+    const dy = dragStartY - e.clientY; // positive = moving up = expanding
+    if (Math.abs(dy) > 3) dragMoved = true;
+    // Live preview: > 24px upward triggers expanded preview, downward collapses.
+    if (dy > 24) {
+      dragTargetExpanded = true;
+      dock.classList.add("is-expanded");
+    } else if (dy < -24) {
+      dragTargetExpanded = false;
+      dock.classList.remove("is-expanded");
+    }
+  }
+  function onPointerUp(e) {
+    if (!dragActive) return;
+    dragActive = false;
+    try { handle.releasePointerCapture(e.pointerId); } catch (_) {}
+    const next = dragMoved ? dragTargetExpanded : !state.expanded;
+    setExpandedVisual(next);
+    if (next !== state.expanded) {
+      state.expanded = next;
+      sendStateEvent(next);
+    }
+    resizeIframe();
+  }
+
+  // --- Iframe sizing ---------------------------------------------------
+  function inflateIframeForDrag() {
+    if (window.Streamlit && window.Streamlit.setFrameHeight) {
+      window.Streamlit.setFrameHeight(
+        Math.max(window.innerHeight || 800, 800),
+      );
+    }
+  }
+  function resizeIframe() {
+    if (dragActive) return;
+    if (window.Streamlit && window.Streamlit.setFrameHeight) {
+      const h = state.expanded ? dockHeightExpanded() : dockHeightCollapsed();
+      window.Streamlit.setFrameHeight(h);
+    }
+  }
+
+  // --- Streamlit bridge ------------------------------------------------
+  const CMD_READY = "streamlit:componentReady";
+  const CMD_SET_VALUE = "streamlit:setComponentValue";
+  const CMD_SET_HEIGHT = "streamlit:setFrameHeight";
+  const RENDER_EVENT = "streamlit:render";
+
+  function postMsg(payload) {
+    try {
+      window.parent.postMessage(
+        Object.assign({ isStreamlitMessage: true }, payload),
+        "*",
+      );
+    } catch (_) { /* noop */ }
+  }
+  function sendToStreamlit(value) {
+    postMsg({ type: CMD_SET_VALUE, value: value, dataType: "json" });
+  }
+  function sendReady() {
+    postMsg({ type: CMD_READY, apiVersion: 1 });
+  }
+  function sendFrameHeight(h) {
+    postMsg({ type: CMD_SET_HEIGHT, height: h });
+  }
+  window.Streamlit = window.Streamlit || {};
+  window.Streamlit.setFrameHeight = sendFrameHeight;
+  window.Streamlit.setComponentValue = sendToStreamlit;
+
+  function onRender(args) {
+    const prevCount = state.messages ? state.messages.length : 0;
+    state.messages = Array.isArray(args.messages) ? args.messages : [];
+    state.expanded = !!args.expanded;
+    state.busy = !!args.busy;
+    state.placeholder = args.placeholder || "";
+    state.micHint = args.mic_hint || "";
+    state.emptyGreeting = args.empty_greeting || "";
+    state.thinkingLabel = args.thinking_label || "";
+    state.sendLabel = args.send_label || "Send";
+    state.micLabel = args.mic_label || "Dictate";
+    state.readAloudLabel = args.read_aloud_label || "Read aloud";
+    state.stopReadingLabel = args.stop_reading_label || "Stop reading";
+    state.lang = args.lang || "de";
+
+    input.placeholder = state.placeholder;
+
+    if (state.messages.length !== prevCount && state.speaking) stopSpeak();
+
+    setExpandedVisual(state.expanded);
+    renderTranscript();
+    updateActionIcon();
+  }
+
+  window.addEventListener("message", function (ev) {
+    if (!ev.data || ev.data.type !== RENDER_EVENT) return;
+    onRender((ev.data && ev.data.args) || {});
+  });
+
+  // Wire events --------------------------------------------------------
+  input.addEventListener("input", updateActionIcon);
+  input.addEventListener("keydown", onKeyDown);
+  actionBtn.addEventListener("click", onActionClick);
+  ttsBtn.addEventListener("click", onTtsClick);
+  handle.addEventListener("pointerdown", onPointerDown);
+  handle.addEventListener("pointermove", onPointerMove);
+  handle.addEventListener("pointerup", onPointerUp);
+  handle.addEventListener("pointercancel", onPointerUp);
+  window.addEventListener("resize", function () {
+    setExpandedVisual(state.expanded);
+  });
+  window.addEventListener("beforeunload", stopSpeak);
+
+  // Initial paint + handshake.
+  setExpandedVisual(false);
+  setSpeakingVisual(false);
+  renderTranscript();
+  updateActionIcon();
+  sendReady();
+  resizeIframe();
+
+})();
+</script>
+</body>
+</html>

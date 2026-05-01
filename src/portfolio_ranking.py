@@ -1,41 +1,25 @@
 """Portfolio ranking: one row per contract, ranked by sustained unprofitability.
 
-A "contract" is a `cost_center_id`. For each contract we compute:
-
-- `current_cm_eur`     : latest month's `cm_db`
-- `unprofitability_eur`: magnitude of average negative CM over the last 3
-  months, i.e. `-mean(min(cm_db, 0))` across the tail. Positive months count
-  as 0, so a single bad month is dampened but a sustained loss dominates.
-- `first_unprofitable_period`, `months_unprofitable`: start + length of the
-  *current* consecutive streak of negative-CM months (walk backward from the
-  latest row while `cm_db < 0`).
-- `top_reason_class`   : classified top negative driver from latest vs. prior
-  month, or None if no prior month exists or no negative drivers.
-- `cm_trend_pp`        : linear-regression slope of `cm_db_pct` over the last
-  6 months, in percentage points per month. Tells you whether margin is
-  structurally deteriorating even when revenue is flat.
-
-The `@st.cache_data` decorator on `compute_rankings` memoizes results so
-fragment reruns (tab switches, sort clicks, unrelated filter tweaks) reuse
-the previous output when the input DataFrame is unchanged. The function
-itself remains pure; the cache wrapper is the only Streamlit touch point.
+A contract is a `cost_center_id`. `unprofitability_eur` is the magnitude of the
+mean negative CM across the last 3 months (positive months count as 0), so a
+single bad month is dampened but a sustained loss dominates. `cm_trend_pp` is
+the regression slope of `cm_db_pct` over the last 6 months.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 from src import drivers
-from src.facility_overview import (
-    DRIVER_ICON,
-    StatusLevel,
-    classify_driver,
-    sparkline_values,
-    status_for,
-)
+
+if TYPE_CHECKING:
+    # Type-only; real imports happen inside functions to avoid a cycle
+    # (facility_overview -> contract_metrics -> portfolio_ranking -> facility_overview).
+    from src.facility_overview import StatusLevel
 
 
 @dataclass
@@ -48,10 +32,11 @@ class ContractRanking:
     entity: str | None
     latest_period: pd.Timestamp | None
     current_cm_eur: float
+    current_revenue_eur: float
     current_margin_pct: float | None
-    margin_mom_pp: float | None  # Δ margin vs prior month in percentage points
-    cm_trend_pp: float | None  # regression slope of cm_db_pct, pp per month (6m window)
-    unprofitability_eur: float  # magnitude of avg negative CM over last 3 months
+    margin_mom_pp: float | None
+    cm_trend_pp: float | None
+    unprofitability_eur: float
     first_unprofitable_period: pd.Timestamp | None
     months_unprofitable: int
     top_reason_class: str | None
@@ -60,24 +45,17 @@ class ContractRanking:
     sparkline_periods: list[pd.Timestamp]
     sparkline_margins: list[float]
     sparkline_cm_eur: list[float]
-    # Per-month MoM % change of cm_db over the 6 most recent pairs (so up to
-    # 6 points). `sparkline_mom_periods[i]` is the "current" month for
-    # `sparkline_cm_mom_pct[i]`. The LAST element equals `cm_mom_pct` — this
-    # is what the row tooltip plots so that the chart's last-point height
-    # visibly matches the Profitability "Trend vs last month" column.
     sparkline_cm_mom_pct: list[float]
     sparkline_mom_periods: list[pd.Timestamp]
-    cm_mom_eur: float | None  # signed € delta: cm_now - cm_prev
-    cm_mom_pct: float | None  # (cm_now - cm_prev) / abs(cm_prev); None if cm_prev == 0
+    cm_mom_eur: float | None
+    cm_mom_pct: float | None
 
 
 def _as_str(row: pd.Series, col: str) -> str | None:
     if col not in row.index:
         return None
     v = row[col]
-    if pd.isna(v):
-        return None
-    return str(v)
+    return None if pd.isna(v) else str(v)
 
 
 def _as_float(row: pd.Series, col: str) -> float:
@@ -91,11 +69,7 @@ def _as_float(row: pd.Series, col: str) -> float:
 
 
 def _cm_pct_series(history: pd.DataFrame) -> pd.Series:
-    """Return `cm_db_pct` as a float Series in percentage-point units.
-
-    Prefers the pre-computed `cm_db_pct` column; falls back to
-    `cm_db / revenue_total * 100` where revenue is positive.
-    """
+    """Return `cm_db_pct` as floats; fall back to cm_db/revenue_total * 100."""
     if "cm_db_pct" in history.columns:
         return pd.to_numeric(history["cm_db_pct"], errors="coerce")
     if "cm_db" in history.columns and "revenue_total" in history.columns:
@@ -106,35 +80,23 @@ def _cm_pct_series(history: pd.DataFrame) -> pd.Series:
 
 
 def _cm_trend_pp(history: pd.DataFrame, window: int = 6) -> float | None:
-    """Slope of contribution-margin percent over the last `window` months,
-    expressed in **percentage points per month**. Returns ``None`` when
-    fewer than 2 usable points are available. `history` must be sorted by
-    `period` ascending (callers inside this module guarantee it).
-    """
+    """Slope of CM% (pp/month) over the trailing `window`; None if <2 points."""
     if history.empty:
         return None
-    tail = history.tail(window)
-    y = _cm_pct_series(tail).to_numpy(dtype=float)
+    y = _cm_pct_series(history.tail(window)).to_numpy(dtype=float)
     y = y[~np.isnan(y)]
     if len(y) < 2:
         return None
     if np.all(y == y[0]):
         return 0.0
-    x = np.arange(len(y), dtype=float)
-    slope, _ = np.polyfit(x, y, 1)
+    slope, _ = np.polyfit(np.arange(len(y), dtype=float), y, 1)
     return float(slope)
 
 
 def _avg_negative_cm_3m(history: pd.DataFrame) -> float:
-    """Magnitude (positive €) of the mean negative CM over the last 3 months.
-
-    Positive months contribute 0; a single bad month is dampened but sustained
-    losses dominate. Returns 0.0 when no usable `cm_db` values exist.
-    """
     if history.empty or "cm_db" not in history.columns:
         return 0.0
-    tail = history.tail(3)
-    y = pd.to_numeric(tail["cm_db"], errors="coerce").to_numpy(dtype=float)
+    y = pd.to_numeric(history.tail(3)["cm_db"], errors="coerce").to_numpy(dtype=float)
     y = y[~np.isnan(y)]
     if len(y) == 0:
         return 0.0
@@ -142,39 +104,33 @@ def _avg_negative_cm_3m(history: pd.DataFrame) -> float:
 
 
 def _compute_streak(history: pd.DataFrame) -> tuple[pd.Timestamp | None, int]:
-    """Start date and length of the current consecutive negative-CM streak.
+    """Start and length of the current consecutive negative-CM streak.
 
-    Walks backward from the latest row while `cm_db < 0`. Returns
-    ``(None, 0)`` if the latest row is not itself unprofitable.
+    Returns ``(None, 0)`` if the latest row isn't itself unprofitable.
     """
     if history.empty or "cm_db" not in history.columns:
         return None, 0
     ordered = history.reset_index(drop=True)
     cm = ordered["cm_db"]
-    i = len(ordered) - 1
-    if pd.isna(cm.iloc[i]) or cm.iloc[i] >= 0:
+    end = len(ordered) - 1
+    if pd.isna(cm.iloc[end]) or cm.iloc[end] >= 0:
         return None, 0
-    start_idx = i
-    while start_idx - 1 >= 0:
-        prev = cm.iloc[start_idx - 1]
+    start = end
+    while start > 0:
+        prev = cm.iloc[start - 1]
         if pd.isna(prev) or prev >= 0:
             break
-        start_idx -= 1
-    return pd.Timestamp(ordered["period"].iloc[start_idx]), (i - start_idx + 1)
+        start -= 1
+    return pd.Timestamp(ordered["period"].iloc[start]), end - start + 1
 
 
 def _top_reason(history: pd.DataFrame) -> tuple[str, str] | None:
-    """Return ``(class_key, title_key)`` of the biggest negative driver.
-
-    Uses the latest row vs the prior row (MoM). Returns ``None`` if either
-    row is missing or no negative driver was found.
-    """
+    """Return (class_key, title_key) of the biggest negative MoM driver."""
+    from src.facility_overview import DRIVER_ICON, classify_driver
     if len(history) < 2:
         return None
-    current = history.iloc[-1]
-    prior = history.iloc[-2]
-    all_drivers = drivers.decompose(current, prior)
-    for d in sorted(all_drivers, key=lambda x: x.delta_eur):
+    decomposed = drivers.decompose(history.iloc[-1], history.iloc[-2])
+    for d in sorted(decomposed, key=lambda x: x.delta_eur):
         if d.delta_eur >= 0:
             break
         cls = classify_driver(d)
@@ -184,14 +140,17 @@ def _top_reason(history: pd.DataFrame) -> tuple[str, str] | None:
     return None
 
 
+def _floats_from(series: pd.Series) -> list[float]:
+    return [(float(v) if pd.notna(v) else 0.0) for v in series.tolist()]
+
+
 @st.cache_data(show_spinner=False)
 def compute_rankings(df: pd.DataFrame) -> list[ContractRanking]:
     """One `ContractRanking` per contract, sorted by unprofitability desc."""
+    from src.facility_overview import sparkline_values, status_for
     if df is None or df.empty or "cost_center_id" not in df.columns:
         return []
 
-    # The loader already sorts by [cost_center_id, period]; re-sort defensively
-    # once here so downstream per-group slicing can skip its own sort.
     df = df.sort_values(["cost_center_id", "period"])
 
     rankings: list[ContractRanking] = []
@@ -199,46 +158,30 @@ def compute_rankings(df: pd.DataFrame) -> list[ContractRanking]:
         if hist.empty:
             continue
         latest = hist.iloc[-1]
-
         rev = _as_float(latest, "revenue_total")
         cm = _as_float(latest, "cm_db")
         margin = (cm / rev) if rev else None
 
-        prior = hist.iloc[-2] if len(hist) >= 2 else None
         margin_mom: float | None = None
         cm_mom_eur: float | None = None
         cm_mom_pct: float | None = None
-        if prior is not None:
+        if len(hist) >= 2:
+            prior = hist.iloc[-2]
             prior_rev = _as_float(prior, "revenue_total")
             if prior_rev > 0 and rev > 0:
-                prev_margin = _as_float(prior, "cm_db") / prior_rev
-                margin_mom = (margin or 0) - prev_margin
-            cm_prev_eur = _as_float(prior, "cm_db")
-            cm_mom_eur = cm - cm_prev_eur
-            if cm_prev_eur != 0:
-                cm_mom_pct = (cm - cm_prev_eur) / abs(cm_prev_eur)
-
-        cm_trend = _cm_trend_pp(hist, window=6)
-        unprofit = _avg_negative_cm_3m(hist)
-
-        streak_start, streak_len = _compute_streak(hist)
-        reason = _top_reason(hist)
+                margin_mom = (margin or 0) - _as_float(prior, "cm_db") / prior_rev
+            cm_prev = _as_float(prior, "cm_db")
+            cm_mom_eur = cm - cm_prev
+            if cm_prev != 0:
+                cm_mom_pct = (cm - cm_prev) / abs(cm_prev)
 
         tail = hist.tail(6)
         spark_periods = [pd.Timestamp(p) for p in tail["period"].tolist()]
-        spark_margins = sparkline_values(tail, n=6)
-        spark_cm_eur = [
-            (float(v) if pd.notna(v) else 0.0)
-            for v in tail.get("cm_db", pd.Series(dtype=float)).tolist()
-        ]
+        spark_cm_eur = _floats_from(tail.get("cm_db", pd.Series(dtype=float)))
 
-        # MoM %-change series: pairwise on the last 7 rows so we get up to 6
-        # points; each point is `(cm[i] - cm[i-1]) / abs(cm[i-1])`.
+        # MoM series: pairwise over last 7 rows yields up to 6 points.
         mom_tail = hist.tail(7)
-        mom_cm = [
-            (float(v) if pd.notna(v) else 0.0)
-            for v in mom_tail.get("cm_db", pd.Series(dtype=float)).tolist()
-        ]
+        mom_cm = _floats_from(mom_tail.get("cm_db", pd.Series(dtype=float)))
         mom_per = [pd.Timestamp(p) for p in mom_tail["period"].tolist()]
         spark_cm_mom_pct: list[float] = []
         spark_mom_periods: list[pd.Timestamp] = []
@@ -249,6 +192,11 @@ def compute_rankings(df: pd.DataFrame) -> list[ContractRanking]:
             spark_cm_mom_pct.append((mom_cm[i] - prev_v) / abs(prev_v))
             spark_mom_periods.append(mom_per[i])
 
+        reason = _top_reason(hist)
+        streak_start, streak_len = _compute_streak(hist)
+        latest_period = (pd.Timestamp(latest["period"])
+                         if pd.notna(latest.get("period")) else None)
+
         rankings.append(ContractRanking(
             cost_center_id=str(cc_id),
             cost_center_name=_as_str(latest, "cost_center_name") or str(cc_id),
@@ -256,19 +204,20 @@ def compute_rankings(df: pd.DataFrame) -> list[ContractRanking]:
             region=_as_str(latest, "region"),
             industry=_as_str(latest, "industry"),
             entity=_as_str(latest, "entity"),
-            latest_period=pd.Timestamp(latest["period"]) if pd.notna(latest.get("period")) else None,
+            latest_period=latest_period,
             current_cm_eur=cm,
+            current_revenue_eur=rev,
             current_margin_pct=margin,
             margin_mom_pp=margin_mom,
-            cm_trend_pp=cm_trend,
-            unprofitability_eur=unprofit,
+            cm_trend_pp=_cm_trend_pp(hist, window=6),
+            unprofitability_eur=_avg_negative_cm_3m(hist),
             first_unprofitable_period=streak_start,
             months_unprofitable=streak_len,
             top_reason_class=reason[0] if reason else None,
             top_reason_title_key=reason[1] if reason else None,
             status=status_for(margin, margin_mom),
             sparkline_periods=spark_periods,
-            sparkline_margins=spark_margins,
+            sparkline_margins=sparkline_values(tail, n=6),
             sparkline_cm_eur=spark_cm_eur,
             sparkline_cm_mom_pct=spark_cm_mom_pct,
             sparkline_mom_periods=spark_mom_periods,
@@ -291,33 +240,30 @@ def filter_rankings(
     search: str | None = None,
     only_unprofitable: bool = True,
 ) -> list[ContractRanking]:
-    """Post-ranking filter. Each arg is AND-combined; empty lists = no filter."""
+    """Post-ranking filter. Each arg is AND-combined; empty lists == no filter."""
     out = rankings
     if only_unprofitable:
         out = [r for r in out if r.unprofitability_eur > 0]
-    if regions:
-        rset = set(regions)
-        out = [r for r in out if (r.region or "") in rset]
-    if clients:
-        cset = set(clients)
-        out = [r for r in out if (r.customer_name or "") in cset]
-    if industries:
-        iset = set(industries)
-        out = [r for r in out if (r.industry or "") in iset]
-    if cost_centers:
-        ccset = set(cost_centers)
-        out = [r for r in out if r.cost_center_id in ccset]
-    if reasons:
-        rset = set(reasons)
-        out = [r for r in out if (r.top_reason_class or "") in rset]
+
+    for values, getter in (
+        (regions, lambda r: r.region or ""),
+        (clients, lambda r: r.customer_name or ""),
+        (industries, lambda r: r.industry or ""),
+        (cost_centers, lambda r: r.cost_center_id),
+        (reasons, lambda r: r.top_reason_class or ""),
+    ):
+        if values:
+            allowed = set(values)
+            out = [r for r in out if getter(r) in allowed]
+
     if search:
         q = search.strip().lower()
         if q:
             out = [
                 r for r in out
-                if q in (r.cost_center_id.lower())
-                or q in ((r.cost_center_name or "").lower())
-                or q in ((r.customer_name or "").lower())
+                if q in r.cost_center_id.lower()
+                or q in (r.cost_center_name or "").lower()
+                or q in (r.customer_name or "").lower()
             ]
     return out
 
@@ -325,13 +271,9 @@ def filter_rankings(
 def totals(rankings: list[ContractRanking]) -> dict:
     """Aggregate stats for the KPI bar."""
     unprof = [r for r in rankings if r.unprofitability_eur > 0]
-    total = float(sum(r.unprofitability_eur for r in unprof))
-    longest: ContractRanking | None = None
-    for r in unprof:
-        if longest is None or r.months_unprofitable > longest.months_unprofitable:
-            longest = r
+    longest = max(unprof, key=lambda r: r.months_unprofitable, default=None)
     return {
-        "total_unprofit_eur": total,
+        "total_unprofit_eur": float(sum(r.unprofitability_eur for r in unprof)),
         "unprofit_count": len(unprof),
         "longest": longest,
     }
